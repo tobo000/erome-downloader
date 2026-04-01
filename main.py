@@ -83,11 +83,10 @@ async def tobo_downloader(client, message):
     urls = list(dict.fromkeys([u.strip().split(' ')[-1] for u in raw_text if "http" in u]))
     if not urls: return
     
-    # Accurate Topic ID extraction
-    topic_id = getattr(message, "reply_to_message_id", None) if message.is_topic_message else None
-    if message.message_thread_id:
-        topic_id = message.message_thread_id
-
+    # --- BLIND TOPIC DETECTION (V8.26) ---
+    # We use getattr to avoid AttributeError if the property doesn't exist
+    topic_id = getattr(message, "message_thread_id", None)
+    
     temp_status_msgs = []
     
     for idx, url in enumerate(urls, 1):
@@ -95,10 +94,11 @@ async def tobo_downloader(client, message):
             photos, videos = scrape_erome(url)
             album_id = url.rstrip('/').split('/')[-1]
             
-            # Using client.send_message instead of message.reply for better Topic support
+            # Use app.send_message for maximum stability
             status_msg = await client.send_message(
                 chat_id=message.chat.id,
                 text=f"🔍 Analyzing: `{album_id}`",
+                reply_to_message_id=message.id,
                 message_thread_id=topic_id
             )
             temp_status_msgs.append(status_msg)
@@ -118,8 +118,8 @@ async def tobo_downloader(client, message):
                 for v_idx, v_url in enumerate(videos, 1):
                     filename = v_url.split('/')[-1].split('?')[0]
                     filepath = os.path.join(DOWNLOAD_DIR, filename)
-                    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
                     
+                    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
                     with session.get(v_url, headers=headers, stream=True) as r:
                         t_s = int(r.headers.get('content-length', 0))
                         d_s = 0
@@ -162,9 +162,7 @@ async def tobo_downloader(client, message):
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.25 is starting...")
-        async for dialog in app.get_dialogs(): pass
-        print("LOG: Tobo Pro is Online!")
+        print("LOG: Tobo Pro V8.26 is Online!")
         await idle()
 
 if __name__ == "__main__":
