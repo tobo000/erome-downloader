@@ -34,7 +34,7 @@ async def edit_status(message, text, last_update_time, force=False):
     now = time.time()
     if force or (now - last_update_time[0] > 3):
         try:
-            await message.edit(text)
+            await message.edit_text(text)
             last_update_time[0] = now
         except: pass
 
@@ -83,11 +83,10 @@ async def tobo_downloader(client, message):
     urls = list(dict.fromkeys([u.strip().split(' ')[-1] for u in raw_text if "http" in u]))
     if not urls: return
     
-    # --- SAFE TOPIC DETECTION ---
-    # This checks for topics/threads without crashing
-    topic_id = getattr(message, "message_thread_id", None)
-    if not topic_id and message.reply_to_message:
-        topic_id = getattr(message.reply_to_message, "message_thread_id", None)
+    # Accurate Topic ID extraction
+    topic_id = getattr(message, "reply_to_message_id", None) if message.is_topic_message else None
+    if message.message_thread_id:
+        topic_id = message.message_thread_id
 
     temp_status_msgs = []
     
@@ -96,8 +95,10 @@ async def tobo_downloader(client, message):
             photos, videos = scrape_erome(url)
             album_id = url.rstrip('/').split('/')[-1]
             
-            status_msg = await message.reply(
-                f"🔍 Analyzing Album: `{album_id}`", 
+            # Using client.send_message instead of message.reply for better Topic support
+            status_msg = await client.send_message(
+                chat_id=message.chat.id,
+                text=f"🔍 Analyzing: `{album_id}`",
                 message_thread_id=topic_id
             )
             temp_status_msgs.append(status_msg)
@@ -107,8 +108,8 @@ async def tobo_downloader(client, message):
                 for i in range(0, len(photos), 10):
                     batch = photos[i:i+10]
                     await client.send_media_group(
-                        message.chat.id, 
-                        [InputMediaPhoto(img) for img in batch], 
+                        chat_id=message.chat.id,
+                        media=[InputMediaPhoto(img) for img in batch],
                         message_thread_id=topic_id
                     )
 
@@ -117,21 +118,21 @@ async def tobo_downloader(client, message):
                 for v_idx, v_url in enumerate(videos, 1):
                     filename = v_url.split('/')[-1].split('?')[0]
                     filepath = os.path.join(DOWNLOAD_DIR, filename)
-                    
                     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
+                    
                     with session.get(v_url, headers=headers, stream=True) as r:
-                        total_size = int(r.headers.get('content-length', 0))
-                        dl_size = 0
+                        t_s = int(r.headers.get('content-length', 0))
+                        d_s = 0
                         with open(filepath, 'wb') as f:
                             for chunk in r.iter_content(chunk_size=1024*1024):
                                 if chunk:
-                                    f.write(chunk); dl_size += len(chunk)
-                                    await edit_status(status_msg, f"📥 Video {v_idx}/{len(videos)}\n{create_progress_bar(dl_size, total_size)}\n{album_id}", last_edit)
+                                    f.write(chunk); d_s += len(chunk)
+                                    await edit_status(status_msg, f"📥 Video {v_idx}/{len(videos)}\n{create_progress_bar(d_s, t_s)}\n{album_id}", last_edit)
                         
                         optimize_video(filepath)
                         dur, w, h = get_video_meta(filepath)
                         thumb = get_video_thumbnail(filepath, f"{filepath}.jpg")
-                        video_files.append({"path": filepath, "thumb": thumb, "w": w, "h": h, "dur": dur, "size": total_size})
+                        video_files.append({"path": filepath, "thumb": thumb, "w": w, "h": h, "dur": dur, "size": t_s})
 
                         if len(video_files) == 10 or v_idx == len(videos):
                             media_group = [InputMediaVideo(v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, caption=f"🎬 Size: {get_human_size(v['size'])}") for v in video_files]
@@ -146,7 +147,11 @@ async def tobo_downloader(client, message):
                                 if v["thumb"] and os.path.exists(v["thumb"]): os.remove(v["thumb"])
                             video_files = []
 
-            await message.reply(f"✅ COMPLETED: `{album_id}`", message_thread_id=topic_id)
+            await client.send_message(
+                chat_id=message.chat.id,
+                text=f"✅ COMPLETED: `{album_id}`",
+                message_thread_id=topic_id
+            )
 
     # AUTO-CLEANUP
     for msg in temp_status_msgs:
@@ -157,8 +162,9 @@ async def tobo_downloader(client, message):
 
 async def main():
     async with app:
+        print("LOG: Tobo Pro V8.25 is starting...")
         async for dialog in app.get_dialogs(): pass
-        print("LOG: Tobo Pro V8.24 is Online!")
+        print("LOG: Tobo Pro is Online!")
         await idle()
 
 if __name__ == "__main__":
