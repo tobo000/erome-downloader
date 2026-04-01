@@ -83,10 +83,6 @@ async def tobo_downloader(client, message):
     urls = list(dict.fromkeys([u.strip().split(' ')[-1] for u in raw_text if "http" in u]))
     if not urls: return
     
-    # --- BLIND TOPIC DETECTION (V8.26) ---
-    # We use getattr to avoid AttributeError if the property doesn't exist
-    topic_id = getattr(message, "message_thread_id", None)
-    
     temp_status_msgs = []
     
     for idx, url in enumerate(urls, 1):
@@ -94,12 +90,11 @@ async def tobo_downloader(client, message):
             photos, videos = scrape_erome(url)
             album_id = url.rstrip('/').split('/')[-1]
             
-            # Use app.send_message for maximum stability
+            # Use standard reply to ensure Topic inheritance
             status_msg = await client.send_message(
                 chat_id=message.chat.id,
                 text=f"🔍 Analyzing: `{album_id}`",
-                reply_to_message_id=message.id,
-                message_thread_id=topic_id
+                reply_to_message_id=message.id # Replying keeps it in the Topic
             )
             temp_status_msgs.append(status_msg)
             last_edit = [0]
@@ -107,10 +102,11 @@ async def tobo_downloader(client, message):
             if photos:
                 for i in range(0, len(photos), 10):
                     batch = photos[i:i+10]
+                    # Sending as Group using reply_to keeps it in the Topic
                     await client.send_media_group(
                         chat_id=message.chat.id,
                         media=[InputMediaPhoto(img) for img in batch],
-                        message_thread_id=topic_id
+                        reply_to_message_id=message.id
                     )
 
             if videos:
@@ -118,8 +114,8 @@ async def tobo_downloader(client, message):
                 for v_idx, v_url in enumerate(videos, 1):
                     filename = v_url.split('/')[-1].split('?')[0]
                     filepath = os.path.join(DOWNLOAD_DIR, filename)
-                    
                     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
+                    
                     with session.get(v_url, headers=headers, stream=True) as r:
                         t_s = int(r.headers.get('content-length', 0))
                         d_s = 0
@@ -137,10 +133,10 @@ async def tobo_downloader(client, message):
                         if len(video_files) == 10 or v_idx == len(videos):
                             media_group = [InputMediaVideo(v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, caption=f"🎬 Size: {get_human_size(v['size'])}") for v in video_files]
                             try:
-                                await client.send_media_group(message.chat.id, media_group, message_thread_id=topic_id)
+                                await client.send_media_group(message.chat.id, media_group, reply_to_message_id=message.id)
                             except:
                                 for v in video_files: 
-                                    await client.send_video(message.chat.id, v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, message_thread_id=topic_id)
+                                    await client.send_video(message.chat.id, v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, reply_to_message_id=message.id)
                             
                             for v in video_files:
                                 if os.path.exists(v["path"]): os.remove(v["path"])
@@ -150,7 +146,7 @@ async def tobo_downloader(client, message):
             await client.send_message(
                 chat_id=message.chat.id,
                 text=f"✅ COMPLETED: `{album_id}`",
-                message_thread_id=topic_id
+                reply_to_message_id=message.id
             )
 
     # AUTO-CLEANUP
@@ -162,7 +158,7 @@ async def tobo_downloader(client, message):
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.26 is Online!")
+        print("LOG: Tobo Pro V8.27 is Online!")
         await idle()
 
 if __name__ == "__main__":
