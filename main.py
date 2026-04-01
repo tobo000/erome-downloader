@@ -83,35 +83,35 @@ def scrape_erome(url):
 async def tobo_downloader(client, message):
     raw_text = message.text.split('\n')
     urls = list(dict.fromkeys([u.strip().split(' ')[-1] for u in raw_text if "http" in u]))
-    if not urls: return await message.edit("❌ **Error:** No links provided!")
+    if not urls: return await message.edit("❌ No links found.")
     
-    await message.edit(f"🚀 **Tobo Pro V8.17**\nProcessing: {len(urls)} Albums")
+    # Store messages to delete later
+    temp_messages = [message] 
+    
+    await message.edit(f"🚀 **Tobo Pro V8.18**\nQueue: {len(urls)} Albums")
 
     for idx, url in enumerate(urls, 1):
         if "erome.com" in url:
             photos, videos = scrape_erome(url)
             album_id = url.rstrip('/').split('/')[-1]
             status_msg = await message.reply(f"📂 **Album:** `{album_id}`\n📊 Found: {len(photos)} Photos, {len(videos)} Videos")
+            temp_messages.append(status_msg)
             last_edit = [0]
 
-            # 1. PHOTOS WITH PROGRESS
+            # 1. PHOTOS
             if photos:
                 photo_files = []
                 for p_idx, p_url in enumerate(photos, 1):
                     filename = p_url.split('/')[-1].split('?')[0] or f"img_{p_idx}.jpg"
                     filepath = os.path.join(DOWNLOAD_DIR, filename)
-                    
-                    # Update Progress
                     bar = create_progress_bar(p_idx, len(photos))
                     await edit_status(status_msg, f"📂 **Album:** `{album_id}`\n📸 **Downloading Photo {p_idx}/{len(photos)}**\n{bar}", last_edit)
-                    
                     try:
                         r = session.get(p_url, stream=True)
                         with open(filepath, 'wb') as f:
                             for chunk in r.iter_content(chunk_size=1024): f.write(chunk)
                         photo_files.append(filepath)
                     except: pass
-
                     if len(photo_files) == 10 or p_idx == len(photos):
                         await edit_status(status_msg, f"📂 **Album:** `{album_id}`\n📤 **Uploading Photo Batch...**", last_edit, force=True)
                         await client.send_media_group(message.chat.id, [InputMediaPhoto(pf) for pf in photo_files])
@@ -119,12 +119,11 @@ async def tobo_downloader(client, message):
                             if os.path.exists(pf): os.remove(pf)
                         photo_files = []
 
-            # 2. VIDEOS WITH LIVE BAR
+            # 2. VIDEOS
             if videos:
                 for v_idx, v_url in enumerate(videos, 1):
                     filename = v_url.split('/')[-1].split('?')[0]
                     filepath = os.path.join(DOWNLOAD_DIR, filename)
-                    
                     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
                     with session.get(v_url, headers=headers, stream=True) as r:
                         total_size = int(r.headers.get('content-length', 0))
@@ -136,25 +135,28 @@ async def tobo_downloader(client, message):
                                     dl_size += len(chunk)
                                     bar = create_progress_bar(dl_size, total_size)
                                     await edit_status(status_msg, f"📂 **Album:** `{album_id}`\n📥 **Downloading Video {v_idx}/{len(videos)}**\n{bar}\n⚡ {get_human_size(dl_size)} / {get_human_size(total_size)}", last_edit)
-
                         optimize_video(filepath)
                         dur, w, h = get_video_meta(filepath)
                         thumb = get_video_thumbnail(filepath, f"{filepath}.jpg")
-                        
                         await edit_status(status_msg, f"📂 **Album:** `{album_id}`\n📤 **Uploading Video {v_idx}/{len(videos)}...**", last_edit, force=True)
                         await client.send_video(message.chat.id, filepath, thumb=thumb, width=w, height=h, duration=dur, caption=f"🎬 Size: {get_human_size(total_size)}", supports_streaming=True)
-                        
                         if os.path.exists(filepath): os.remove(filepath)
                         if thumb and os.path.exists(thumb): os.remove(thumb)
             
-            await status_msg.edit(f"✅ **COMPLETED ALBUM:** `{album_id}`")
+            await status_msg.edit(f"✅ **COMPLETED:** `{album_id}`")
 
-    await message.reply("🏆 **All tasks finished successfully!**")
+    # --- AUTO CLEAN LOGIC ---
+    done_msg = await message.reply("🏆 **All tasks finished! Cleaning logs in 5s...**")
+    await asyncio.sleep(5)
+    for msg in temp_messages:
+        try:
+            await msg.delete()
+        except: pass
+    await done_msg.delete()
 
 async def start_bot():
     await app.start()
-    async for dialog in app.get_dialogs(): pass
-    print("LOG: Tobo Pro V8.17 is Online!")
+    print("LOG: Tobo Pro V8.18 Auto-Clean is Online!")
     await idle()
 
 if __name__ == "__main__":
