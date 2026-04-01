@@ -26,19 +26,13 @@ def get_human_size(num):
     return f"{num:.1f} TB"
 
 def get_video_meta(video_path):
-    """Extracts width, height, and duration using ffprobe."""
     try:
-        cmd = [
-            'ffprobe', '-v', 'quiet', '-print_format', 'json', 
-            '-show_streams', '-show_format', video_path
-        ]
+        cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8')
         data = json.loads(res)
-        
         duration = int(float(data['format']['duration']))
         width = 0
         height = 0
-        
         for stream in data['streams']:
             if stream['codec_type'] == 'video':
                 width = int(stream['width'])
@@ -49,10 +43,7 @@ def get_video_meta(video_path):
 
 def get_video_thumbnail(video_path, thumb_path):
     try:
-        subprocess.run([
-            'ffmpeg', '-ss', '00:00:01', '-i', video_path, 
-            '-vframes', '1', '-q:v', '2', thumb_path, '-y'
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.STNULL)
+        subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', video_path, '-vframes', '1', '-q:v', '2', thumb_path, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.STNULL)
         return thumb_path if os.path.exists(thumb_path) else None
     except: return None
 
@@ -91,29 +82,35 @@ async def tobo_downloader(client, message):
     urls = list(dict.fromkeys([u.strip().split(' ')[-1] for u in raw_text if "http" in u]))
     if not urls: return await message.edit("❌ Provide a link!")
     
-    await message.edit(f"🚀 **Tobo Pro V8.6**\nLinks: {len(urls)}\nStatus: Playable Videos | Original Size Logic...")
+    await message.edit(f"🚀 **Tobo Pro V8.7**\nProcessing {len(urls)} album(s)...")
 
     for idx, url in enumerate(urls, 1):
         if "erome.com" in url:
             photos, videos = scrape_erome(url)
             album_id = url.rstrip('/').split('/')[-1]
-            await message.reply(f"📂 **ALBUM [{idx}/{len(urls)}]:** `{album_id}`\n📊 Found: {len(photos)} Photos, {len(videos)} Videos")
+            status_msg = await message.reply(f"📂 **Album:** `{album_id}`\n📊 Found: {len(photos)} Photos, {len(videos)} Videos\n⏳ Initializing...")
 
+            # 1. Photos First
             if photos:
+                await status_msg.edit(f"📂 **Album:** `{album_id}`\n📸 Uploading Photos...")
                 for i in range(0, len(photos), 10):
                     batch = photos[i:i+10]
                     media = [InputMediaPhoto(img) for img in batch]
                     await client.send_media_group(message.chat.id, media)
 
+            # 2. Videos (With Live Download Status)
             if videos:
                 video_payload = []
-                for v_url in videos:
+                for v_idx, v_url in enumerate(videos, 1):
                     filename = v_url.split('/')[-1].split('?')[0]
                     filepath = os.path.join(DOWNLOAD_DIR, filename)
                     thumb_path = f"{filepath}.jpg"
-                    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
+                    
+                    # Update status for user
+                    await status_msg.edit(f"📂 **Album:** `{album_id}`\n📥 Downloading Video `{v_idx}/{len(videos)}`...")
                     
                     try:
+                        headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
                         head = session.head(v_url, headers=headers, allow_redirects=True)
                         size_bytes = int(head.headers.get('content-length', 0))
                         p_size = get_human_size(size_bytes)
@@ -125,32 +122,35 @@ async def tobo_downloader(client, message):
                                 with open(filepath, 'wb') as f:
                                     for chk in r.iter_content(chunk_size=1024*1024): f.write(chk)
                         
-                        # V8.6: Extract Meta to prevent Telegram Compression
+                        # Process Meta
                         duration, w, h = get_video_meta(filepath)
                         thumb = get_video_thumbnail(filepath, thumb_path)
                         
                         video_payload.append(InputMediaVideo(
                             filepath, thumb=thumb, width=w, height=h, 
                             duration=duration, supports_streaming=True,
-                            caption=f"🎬 **Size:** {p_size}"
+                            caption=f"🎬 Size: {p_size}"
                         ))
 
-                        if len(video_payload) == 10 or v_url == videos[-1]:
+                        # Send batch of 10 or the last few
+                        if len(video_payload) == 10 or v_idx == len(videos):
+                            await status_msg.edit(f"📂 **Album:** `{album_id}`\n📤 Uploading Video Batch to Telegram...")
                             await client.send_media_group(message.chat.id, video_payload)
                             for vid in video_payload:
                                 if os.path.exists(vid.media): os.remove(vid.media)
                                 if vid.thumb and os.path.exists(vid.thumb): os.remove(vid.thumb)
                             video_payload = []
-                    except: pass
+                    except Exception as e:
+                        await message.reply(f"⚠️ Error on Video {v_idx}: {e}")
             
-            await message.reply(f"✅ **ALBUM COMPLETED:** `{album_id}`")
+            await status_msg.edit(f"✅ **COMPLETED:** `{album_id}`")
 
-    await message.reply("🏆 **All Tasks Completed!**")
+    await message.reply("🏆 **All Tasks Finished!**")
 
 async def start_bot():
     await app.start()
     async for dialog in app.get_dialogs(): pass
-    print("LOG: Tobo Pro V8.6 is online!")
+    print("LOG: Tobo Pro V8.7 is online!")
     await idle()
     await app.stop()
 
