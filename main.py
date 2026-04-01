@@ -10,8 +10,6 @@ from pyrogram.types import InputMediaPhoto, InputMediaVideo
 from concurrent.futures import ThreadPoolExecutor
 
 # --- CONFIGURATION ---
-# IMPORTANT: Use your actual ID if you want to restrict the bot to ONLY you.
-# If you want ANYONE to use it, remove 'filters.user' below.
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 
@@ -78,18 +76,19 @@ def scrape_erome(url):
 
 # ==========================================
 # COMMAND HANDLER (.dl)
-# CHANGED: Removed filters.me so it responds to your messages correctly.
 # ==========================================
 @app.on_message(filters.command("dl", prefixes="."))
 async def tobo_downloader(client, message):
-    # Security: Ensure only the owner can use it if desired
-    # if message.from_user.id != YOUR_ID: return 
-
     raw_text = message.text.split('\n')
     urls = list(dict.fromkeys([u.strip().split(' ')[-1] for u in raw_text if "http" in u]))
     if not urls: return
     
-    topic_id = message.message_thread_id
+    # --- SAFE TOPIC DETECTION ---
+    # This checks for topics/threads without crashing
+    topic_id = getattr(message, "message_thread_id", None)
+    if not topic_id and message.reply_to_message:
+        topic_id = getattr(message.reply_to_message, "message_thread_id", None)
+
     temp_status_msgs = []
     
     for idx, url in enumerate(urls, 1):
@@ -97,15 +96,21 @@ async def tobo_downloader(client, message):
             photos, videos = scrape_erome(url)
             album_id = url.rstrip('/').split('/')[-1]
             
-            status_msg = await message.reply(f"🔍 Analyzing: `{album_id}`", message_thread_id=topic_id)
+            status_msg = await message.reply(
+                f"🔍 Analyzing Album: `{album_id}`", 
+                message_thread_id=topic_id
+            )
             temp_status_msgs.append(status_msg)
             last_edit = [0]
 
             if photos:
                 for i in range(0, len(photos), 10):
                     batch = photos[i:i+10]
-                    await edit_status(status_msg, f"📸 Uploading Photos: {album_id}...", last_edit, force=True)
-                    await client.send_media_group(message.chat.id, [InputMediaPhoto(img) for img in batch], message_thread_id=topic_id)
+                    await client.send_media_group(
+                        message.chat.id, 
+                        [InputMediaPhoto(img) for img in batch], 
+                        message_thread_id=topic_id
+                    )
 
             if videos:
                 video_files = []
@@ -133,7 +138,8 @@ async def tobo_downloader(client, message):
                             try:
                                 await client.send_media_group(message.chat.id, media_group, message_thread_id=topic_id)
                             except:
-                                for v in video_files: await client.send_video(message.chat.id, v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, message_thread_id=topic_id)
+                                for v in video_files: 
+                                    await client.send_video(message.chat.id, v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, message_thread_id=topic_id)
                             
                             for v in video_files:
                                 if os.path.exists(v["path"]): os.remove(v["path"])
@@ -149,12 +155,10 @@ async def tobo_downloader(client, message):
     try: await message.delete() 
     except: pass
 
-# --- CORRECT STARTUP ---
 async def main():
     async with app:
-        print("LOG: Syncing Dialogs...")
         async for dialog in app.get_dialogs(): pass
-        print("LOG: Tobo Pro is Online!")
+        print("LOG: Tobo Pro V8.24 is Online!")
         await idle()
 
 if __name__ == "__main__":
