@@ -11,7 +11,7 @@ from pyrogram.types import InputMediaPhoto, InputMediaVideo
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-# --- CONFIGURATION (Keep your .env setup) ---
+# --- CONFIGURATION ---
 load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
@@ -65,7 +65,7 @@ def download_nitro(url, path, headers, size, segs=4):
     with ThreadPoolExecutor(max_workers=segs) as ex:
         for i in range(segs):
             start = i * chunk
-            end = (i + 1) * chunk - 1 if i < segs - 1 else size - 1
+            end = (i + 1) * chunk - 1 if i < size - 1 else size - 1
             ex.submit(dl_part, start, end, i)
     with open(path, 'wb') as f:
         for i in range(segs):
@@ -75,17 +75,17 @@ def download_nitro(url, path, headers, size, segs=4):
                 os.remove(pp)
 
 # ==========================================
-# SCRAPER ENGINE (V8.40: Pre-Pull Logic)
+# SCRAPER ENGINE (V8.41: Robust Video Fix)
 # ==========================================
 def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'}
     try:
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
         title_tag = soup.find("h1") or soup.find("title")
         album_title = title_tag.get_text(strip=True) if title_tag else "Untitled"
         
-        # --- IMPROVED PHOTO SCRAPING ---
+        # --- ROBUST PHOTO SCRAPING ---
         p_links = []
         for img in soup.select('div.img img'):
             src = img.get('data-src') or img.get('src')
@@ -93,23 +93,35 @@ def scrape_album_details(url):
                 p_links.append(src if src.startswith('http') else 'https:' + src)
         p_l = list(dict.fromkeys(p_links))
         
-        # --- IMPROVED VIDEO SCRAPING (Deep Search) ---
+        # --- DEEP SCAN VIDEO SCRAPING ---
         v_links = []
-        # Check video and source tags
-        for tag in soup.find_all(['video', 'source']):
-            src = tag.get('src') or tag.get('data-src')
-            if src and ".mp4" in src.lower():
-                v_links.append(src if src.startswith('http') else 'https:' + src)
+        # ឆែកគ្រប់ Video Tags និង Source Tags ទាំងអស់
+        for v_tag in soup.find_all('video'):
+            # ឆែកក្នុង attributes របស់ video tag
+            for attr in ['src', 'data-src']:
+                val = v_tag.get(attr)
+                if val: v_links.append(val)
+            # ឆែកក្នុង tags source ដែលនៅខាងក្នុង video tag
+            for s_tag in v_tag.find_all('source'):
+                for attr in ['src', 'data-src']:
+                    val = s_tag.get(attr)
+                    if val: v_links.append(val)
+
+        # សម្អាត និងកែទម្រង់ Link ឱ្យត្រឹមត្រូវ
+        v_l = []
+        for link in v_links:
+            full_link = link if link.startswith('http') else 'https:' + link
+            # យកតែ link ណាដែលជាវីដេអូពិតប្រាកដ
+            if ".mp4" in full_link.lower() or "/video/" in full_link.lower():
+                v_l.append(full_link)
         
-        # Check for mp4 links in text (Regex fallback)
-        raw_mp4s = re.findall(r'https?://[^\s"\'>]+\.mp4', res.text)
-        for link in raw_mp4s:
-            if "erome.com" in link: v_links.append(link)
-            
-        v_l = list(dict.fromkeys(v_links))
+        v_l = list(dict.fromkeys(v_l))
         
+        print(f"DEBUG: Found {len(p_l)} photos and {len(v_l)} videos in {album_title}")
         return album_title, p_l, v_l
-    except: return "Error", [], []
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return "Error", [], []
 
 def get_all_profile_content(username):
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -134,19 +146,17 @@ def get_all_profile_content(username):
 # DELIVERY ENGINE
 # ==========================================
 async def process_album(client, message, url):
-    # 1. SCRAPE FIRST
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return
     
     album_id = url.rstrip('/').split('/')[-1]
     
-    # 2. TELL COUNTS FIRST (Removed message_thread_id for stability)
+    # ផ្ញើសារប្រាប់ចំនួនមុននឹងទាញយក
     status_text = f"🔍 **Analyzing:** `{title}`\n\n📸 Photos: `{len(photos)}` \n🎬 Videos: `{len(videos)}`"
     status = await client.send_message(message.chat.id, status_text, reply_to_message_id=message.id)
     last_edit = [0]
-    await asyncio.sleep(1)
 
-    # 3. DOWNLOAD & SEND PHOTOS
+    # 1. បញ្ជូនរូបភាព
     if photos:
         p_files = []
         for p_idx, p_url in enumerate(photos, 1):
@@ -163,13 +173,15 @@ async def process_album(client, message, url):
                     p_files = []
             except: pass
 
-    # 4. DOWNLOAD & SEND VIDEOS
+    # 2. បញ្ជូនវីដេអូ
     if videos:
         video_payload = []
         for v_idx, v_url in enumerate(videos, 1):
-            filename = v_url.split('/')[-1].split('?')[0]
-            if ".mp4" not in filename: filename += ".mp4"
-            filepath = os.path.join(DOWNLOAD_DIR, f"{album_id}_{filename}")
+            # រៀបចំឈ្មោះ file ឱ្យស្អាត
+            v_name = v_url.split('/')[-1].split('?')[0]
+            if ".mp4" not in v_name.lower(): v_name += ".mp4"
+            
+            filepath = os.path.join(DOWNLOAD_DIR, f"{album_id}_{v_name}")
             headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
             try:
                 head = session.head(v_url, headers=headers, allow_redirects=True)
@@ -205,7 +217,8 @@ async def process_album(client, message, url):
                         if os.path.exists(v["path"]): os.remove(v["path"])
                         if os.path.exists(v["thumb"]): os.remove(v["thumb"])
                     video_payload = []
-            except: pass
+            except Exception as e:
+                print(f"Error Video {v_idx}: {e}")
 
     await status.delete()
     await client.send_message(message.chat.id, f"✅ **COMPLETED:** `{title}`", reply_to_message_id=message.id)
@@ -246,7 +259,7 @@ async def user_handler(client, message):
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.40 Ready (Ultra Video Fix)!")
+        print("LOG: Tobo Pro V8.41 Ready (Video Detection Fix)!")
         await idle()
 
 if __name__ == "__main__":
