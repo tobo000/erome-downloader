@@ -90,25 +90,42 @@ async def tobo_downloader(client, message):
             photos, videos = scrape_erome(url)
             album_id = url.rstrip('/').split('/')[-1]
             
-            # Use standard reply to ensure Topic inheritance
             status_msg = await client.send_message(
                 chat_id=message.chat.id,
                 text=f"🔍 Analyzing: `{album_id}`",
-                reply_to_message_id=message.id # Replying keeps it in the Topic
+                reply_to_message_id=message.id
             )
             temp_status_msgs.append(status_msg)
             last_edit = [0]
 
+            # 1. PHOTOS (Download to local first to avoid MEDIA_INVALID)
             if photos:
-                for i in range(0, len(photos), 10):
-                    batch = photos[i:i+10]
-                    # Sending as Group using reply_to keeps it in the Topic
-                    await client.send_media_group(
-                        chat_id=message.chat.id,
-                        media=[InputMediaPhoto(img) for img in batch],
-                        reply_to_message_id=message.id
-                    )
+                photo_batch = []
+                for p_idx, p_url in enumerate(photos, 1):
+                    filename = f"img_{album_id}_{p_idx}.jpg"
+                    filepath = os.path.join(DOWNLOAD_DIR, filename)
+                    
+                    await edit_status(status_msg, f"📸 Downloading Photo {p_idx}/{len(photos)}\n{create_progress_bar(p_idx, len(photos))}\n{album_id}", last_edit)
+                    
+                    try:
+                        r = session.get(p_url, stream=True)
+                        if r.status_code == 200:
+                            with open(filepath, 'wb') as f:
+                                for chunk in r.iter_content(chunk_size=1024): f.write(chunk)
+                            photo_batch.append(filepath)
 
+                        if len(photo_batch) == 10 or p_idx == len(photos):
+                            await client.send_media_group(
+                                chat_id=message.chat.id,
+                                media=[InputMediaPhoto(pf) for pf in photo_batch],
+                                reply_to_message_id=message.id
+                            )
+                            for pf in photo_batch:
+                                if os.path.exists(pf): os.remove(pf)
+                            photo_batch = []
+                    except: pass
+
+            # 2. VIDEOS (Same Reliable Logic)
             if videos:
                 video_files = []
                 for v_idx, v_url in enumerate(videos, 1):
@@ -123,7 +140,7 @@ async def tobo_downloader(client, message):
                             for chunk in r.iter_content(chunk_size=1024*1024):
                                 if chunk:
                                     f.write(chunk); d_s += len(chunk)
-                                    await edit_status(status_msg, f"📥 Video {v_idx}/{len(videos)}\n{create_progress_bar(d_s, t_s)}\n{album_id}", last_edit)
+                                    await edit_status(status_msg, f"📥 Video {v_idx}/{len(videos)}\n{create_progress_bar(d_s, t_s)}\n{get_human_size(d_s)} / {get_human_size(t_s)}", last_edit)
                         
                         optimize_video(filepath)
                         dur, w, h = get_video_meta(filepath)
@@ -158,7 +175,9 @@ async def tobo_downloader(client, message):
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.27 is Online!")
+        print("LOG: Tobo Pro V8.28 is starting...")
+        async for dialog in app.get_dialogs(): pass
+        print("LOG: Tobo Pro is Online!")
         await idle()
 
 if __name__ == "__main__":
