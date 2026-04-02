@@ -7,25 +7,24 @@ import json
 import re
 from bs4 import BeautifulSoup
 from pyrogram import Client, filters, idle
-from pyrogram.types import InputMediaPhoto, InputMediaVideo
+from pyrogram.types import InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION (Keep your .env) ---
 load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
-
-if not API_ID or not API_HASH:
-    print("❌ FATAL ERROR: Check your .env file!")
-    exit(1)
 
 app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH)
 DOWNLOAD_DIR = "downloads"
 if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 session = requests.Session()
 
-# --- HELPERS ---
+# Cache for .user command
+data_cache = {}
+
+# --- HELPERS (Your Original Reliable Helpers) ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, current * 100 / total)
@@ -55,9 +54,8 @@ def get_video_meta(video_path):
         duration = int(float(data['format']['duration']))
         v = next(s for s in data['streams'] if s['codec_type'] == 'video')
         has_audio = any(s['codec_type'] == 'audio' for s in data['streams'])
-        return duration, v.get('width', 1280), v.get('height', 720), has_audio
-    except:
-        return 0, 1280, 720, False
+        return duration, v['width'], v['height'], has_audio
+    except: return 0, 1280, 720, False
 
 def download_nitro(url, path, headers, size, segs=4):
     chunk = size // segs
@@ -81,10 +79,10 @@ def download_nitro(url, path, headers, size, segs=4):
                 os.remove(pp)
 
 # ==========================================
-# SCRAPER ENGINE
+# SCRAPER ENGINE (V8.53: Optimized)
 # ==========================================
 def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0'}
     try:
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -103,69 +101,43 @@ def scrape_album_details(url):
         return album_title, p_l, v_l
     except: return "Error", [], []
 
-async def get_all_profile_content(username, status_msg):
-    """Refined Deep Scanner: Targeted for both Posts and Reposts properly"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0',
-        'Referer': 'https://www.erome.com/'
-    }
-    all_links = []
-    
-    # 6xyy specific fix: Scrape home page and reposts tab separately
+async def full_scan_profile(username, status_msg):
+    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.erome.com/'}
+    results = {"posts": [], "reposts": []}
     for tab in ["", "/reposts"]:
         page = 1
-        tab_name = "Original Posts" if tab == "" else "Reposts"
+        key = "posts" if tab == "" else "reposts"
         while True:
-            await status_msg.edit_text(f"🕵️‍♂️ **Scanning {username}...**\nSection: `{tab_name}`\nPage: `{page}`\nItems Found: `{len(all_links)}`")
-            
+            await status_msg.edit_text(f"🕵️‍♂️ **Scanning {username}...**\n\n📝 Posts found: `{len(results['posts'])}` \n🔁 Reposts found: `{len(results['reposts'])}` \n\n*Scanning {key} page {page}...*")
             url = f"https://www.erome.com/{username}{tab}?page={page}"
             try:
                 res = session.get(url, headers=headers, timeout=20)
                 if res.status_code != 200: break
                 soup = BeautifulSoup(res.text, 'html.parser')
-                
-                # Broad Link Capture
-                links = []
-                for a in soup.find_all("a", href=True):
-                    href = a['href']
-                    # Album links are always in /a/ format
-                    if "/a/" in href and "erome.com" not in href:
-                        # Clean relative URLs
-                        clean_href = 'https://www.erome.com' + href if href.startswith('/') else href
-                        links.append(clean_href)
-                
+                links = [ 'https://www.erome.com' + a['href'] if a['href'].startswith('/') else a['href'] 
+                         for a in soup.find_all("a", href=True) if "/a/" in a['href'] and "erome.com" not in a['href'] ]
                 if not links: break
-                
-                initial_count = len(all_links)
+                added = 0
                 for l in links:
-                    if l not in all_links:
-                        all_links.append(l)
-                
-                # If no new links were added on this page, it might be the end
-                if len(all_links) == initial_count: break
-                
-                # Check for Next Button (using regex to find text containing 'Next')
-                next_btn = soup.find("a", string=re.compile(r"Next", re.IGNORECASE))
-                if not next_btn: break
-                
+                    if l not in results[key]:
+                        results[key].append(l); added += 1
+                if added == 0: break
+                if not soup.find("a", string=re.compile(r"Next", re.I)): break
                 page += 1
-                await asyncio.sleep(0.6) 
+                await asyncio.sleep(0.3)
             except: break
-            
-    return list(dict.fromkeys(all_links))
+    return results
 
 # ==========================================
-# DELIVERY ENGINE
+# DELIVERY ENGINE (V8.53: Your Reliable Logic)
 # ==========================================
 async def process_album(client, message, url):
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return
-    
     album_id = url.rstrip('/').split('/')[-1]
     status = await client.send_message(message.chat.id, f"🔍 **Analyzing:** `{title}`", reply_to_message_id=message.id)
     last_edit = [0]
 
-    # 1. Photos
     if photos:
         p_files = []
         for p_idx, p_url in enumerate(photos, 1):
@@ -181,7 +153,6 @@ async def process_album(client, message, url):
                     p_files = []
             except: pass
 
-    # 2. Videos (Real Video + Audio Fix)
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             v_name = v_url.split('/')[-1].split('?')[0]
@@ -192,7 +163,6 @@ async def process_album(client, message, url):
                 head = session.head(v_url, headers=headers, allow_redirects=True, timeout=15)
                 size = int(head.headers.get('content-length', 0))
                 await edit_status(status, f"📥 **Downloading Video {v_idx}/{len(videos)}**\nSize: {get_human_size(size)}", last_edit, force=True)
-                
                 if size > 15*1024*1024: download_nitro(v_url, filepath, headers, size)
                 else:
                     r = session.get(v_url, headers=headers, stream=True, timeout=60)
@@ -201,17 +171,13 @@ async def process_album(client, message, url):
                 
                 if not os.path.exists(filepath): continue
                 dur, w, h, has_audio = get_video_meta(filepath)
-                
-                # Audio fix
                 if not has_audio:
                     temp_path = filepath + ".fix.mp4"
                     subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp_path, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    if os.path.exists(temp_path):
-                        os.remove(filepath); os.rename(temp_path, filepath)
+                    if os.path.exists(temp_path): os.remove(filepath); os.rename(temp_path, filepath)
                 
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                
                 await client.send_video(message.chat.id, video=filepath, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur, caption=f"🎬 **{title}**\n📦 {get_human_size(size)}", supports_streaming=True, reply_to_message_id=message.id)
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
@@ -233,29 +199,31 @@ async def dl_handler(client, message):
 @app.on_message(filters.command("user", prefixes="."))
 async def user_handler(client, message):
     if len(message.command) < 2: return
-    username = message.command[1]
-    crawl_msg = await message.reply(f"🕵️‍♂️ **Initializing Scanner for `{username}`...**")
-    
-    urls = await get_all_profile_content(username, crawl_msg)
-    
-    if not urls:
-        return await crawl_msg.edit(f"❌ No content found for user `{username}`.")
-    
-    await crawl_msg.edit(f"🚀 Found **{len(urls)}** items (27 Posts + Reposts).\nStarting sequential archive...")
-    
+    username = message.command[1].split('/')[-1]
+    msg = await message.reply(f"🕵️‍♂️ **Scanning profile:** `{username}`...")
+    results = await full_scan_profile(username, msg)
+    data_cache[username] = results
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"📥 Posts ({len(results['posts'])})", callback_data=f"dl_p|{username}")],
+        [InlineKeyboardButton(f"🔁 Reposts ({len(results['reposts'])})", callback_data=f"dl_r|{username}")]
+    ])
+    await msg.edit_text(f"👤 **User:** `{username}`\n📝 Original Posts: `{len(results['posts'])}` \n🔁 Reposts: `{len(results['reposts'])}` \n\nSelect an option:", reply_markup=buttons)
+
+@app.on_callback_query(filters.regex(r"^dl_(p|r)\|"))
+async def handle_callback(client, callback: CallbackQuery):
+    action, username = callback.data.split("|")
+    type_key = "posts" if action == "dl_p" else "reposts"
+    urls = data_cache.get(username, {}).get(type_key, [])
+    if not urls: return await callback.answer("❌ No items found.", show_alert=True)
+    await callback.message.edit_text(f"🚀 Archiving {len(urls)} {type_key}...")
     for url in urls:
-        await process_album(client, message, url)
+        await process_album(client, callback.message, url)
         await asyncio.sleep(2)
-        
-    await message.reply(f"🏆 Profile archive for `{username}` complete! Total items found: {len(urls)}")
-    try:
-        await crawl_msg.delete()
-        await message.delete()
-    except: pass
+    await callback.message.reply(f"🏆 Completed {type_key} archive for `{username}`!")
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.51 Online (Full Archive Fix)!")
+        print("LOG: Tobo Pro V8.53 Ready!")
         await idle()
 
 if __name__ == "__main__":
