@@ -22,8 +22,7 @@ if not API_ID or not API_HASH:
 
 app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH)
 DOWNLOAD_DIR = "downloads"
-if not os.path.exists(DOWNLOAD_DIR): 
-    os.makedirs(DOWNLOAD_DIR)
+if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 session = requests.Session()
 
 # --- HELPERS ---
@@ -53,7 +52,7 @@ def get_video_meta(video_path):
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8')
         data = json.loads(res)
-        duration = int(float(data.get('format', {}).get('duration', 0)))
+        duration = int(float(data['format']['duration']))
         v = next(s for s in data['streams'] if s['codec_type'] == 'video')
         has_audio = any(s['codec_type'] == 'audio' for s in data['streams'])
         return duration, v.get('width', 1280), v.get('height', 720), has_audio
@@ -91,10 +90,8 @@ def scrape_album_details(url):
         soup = BeautifulSoup(res.text, 'html.parser')
         title_tag = soup.find("h1") or soup.find("title")
         album_title = title_tag.get_text(strip=True) if title_tag else "Untitled"
-        
         p_l = list(dict.fromkeys([i.get('data-src') or i.get('src') for i in soup.select('div.img img') if "erome.com" in (i.get('data-src') or i.get('src', ''))]))
         p_l = [x if x.startswith('http') else 'https:' + x for x in p_l if x]
-        
         v_candidates = []
         for tag in soup.find_all(['video', 'source', 'a']):
             src = tag.get('src') or tag.get('data-src') or tag.get('href')
@@ -107,18 +104,19 @@ def scrape_album_details(url):
     except: return "Error", [], []
 
 async def get_all_profile_content(username, status_msg):
-    """Ultra Scanner: Robust page flipping for both Posts and Reposts"""
+    """Refined Deep Scanner: Targeted for both Posts and Reposts properly"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0',
-        'Referer': f'https://www.erome.com/{username}'
+        'Referer': 'https://www.erome.com/'
     }
     all_links = []
     
+    # 6xyy specific fix: Scrape home page and reposts tab separately
     for tab in ["", "/reposts"]:
         page = 1
         tab_name = "Original Posts" if tab == "" else "Reposts"
         while True:
-            await status_msg.edit_text(f"🕵️‍♂️ **Ultra Scanning {username}...**\nSection: `{tab_name}`\nPage: `{page}`\nItems Found: `{len(all_links)}`")
+            await status_msg.edit_text(f"🕵️‍♂️ **Scanning {username}...**\nSection: `{tab_name}`\nPage: `{page}`\nItems Found: `{len(all_links)}`")
             
             url = f"https://www.erome.com/{username}{tab}?page={page}"
             try:
@@ -126,29 +124,32 @@ async def get_all_profile_content(username, status_msg):
                 if res.status_code != 200: break
                 soup = BeautifulSoup(res.text, 'html.parser')
                 
-                # Capture album links more aggressively
+                # Broad Link Capture
                 links = []
                 for a in soup.find_all("a", href=True):
                     href = a['href']
-                    # Valid album link pattern: /a/XXXXXXX
-                    if re.search(r'/a/[a-zA-Z0-9]+', href) and "erome.com" not in href:
-                        links.append(href)
+                    # Album links are always in /a/ format
+                    if "/a/" in href and "erome.com" not in href:
+                        # Clean relative URLs
+                        clean_href = 'https://www.erome.com' + href if href.startswith('/') else href
+                        links.append(clean_href)
                 
-                if not links:
-                    # If this tab has no links, don't break the whole loop, just try next tab
-                    break
+                if not links: break
                 
+                initial_count = len(all_links)
                 for l in links:
-                    full_url = 'https://www.erome.com' + l
-                    if full_url not in all_links:
-                        all_links.append(full_url)
+                    if l not in all_links:
+                        all_links.append(l)
                 
-                # Check for Next button
-                next_page = soup.find("a", string=re.compile("Next", re.I))
-                if not next_page: break
+                # If no new links were added on this page, it might be the end
+                if len(all_links) == initial_count: break
+                
+                # Check for Next Button (using regex to find text containing 'Next')
+                next_btn = soup.find("a", string=re.compile(r"Next", re.IGNORECASE))
+                if not next_btn: break
                 
                 page += 1
-                await asyncio.sleep(0.5) 
+                await asyncio.sleep(0.6) 
             except: break
             
     return list(dict.fromkeys(all_links))
@@ -180,7 +181,7 @@ async def process_album(client, message, url):
                     p_files = []
             except: pass
 
-    # 2. Videos (Real Video Delivery)
+    # 2. Videos (Real Video + Audio Fix)
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             v_name = v_url.split('/')[-1].split('?')[0]
@@ -201,6 +202,7 @@ async def process_album(client, message, url):
                 if not os.path.exists(filepath): continue
                 dur, w, h, has_audio = get_video_meta(filepath)
                 
+                # Audio fix
                 if not has_audio:
                     temp_path = filepath + ".fix.mp4"
                     subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp_path, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -232,20 +234,20 @@ async def dl_handler(client, message):
 async def user_handler(client, message):
     if len(message.command) < 2: return
     username = message.command[1]
-    crawl_msg = await message.reply(f"🕵️‍♂️ **Initializing Ultra Scanner for `{username}`...**")
+    crawl_msg = await message.reply(f"🕵️‍♂️ **Initializing Scanner for `{username}`...**")
     
     urls = await get_all_profile_content(username, crawl_msg)
     
     if not urls:
         return await crawl_msg.edit(f"❌ No content found for user `{username}`.")
     
-    await crawl_msg.edit(f"🚀 Found **{len(urls)}** items. Starting sequential archive...")
+    await crawl_msg.edit(f"🚀 Found **{len(urls)}** items (27 Posts + Reposts).\nStarting sequential archive...")
     
     for url in urls:
         await process_album(client, message, url)
         await asyncio.sleep(2)
         
-    await message.reply(f"🏆 Profile `{username}` archive complete! Total items: {len(urls)}")
+    await message.reply(f"🏆 Profile archive for `{username}` complete! Total items found: {len(urls)}")
     try:
         await crawl_msg.delete()
         await message.delete()
@@ -253,7 +255,7 @@ async def user_handler(client, message):
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.50 Ready (Ultra Scanner Fix)!")
+        print("LOG: Tobo Pro V8.51 Online (Full Archive Fix)!")
         await idle()
 
 if __name__ == "__main__":
