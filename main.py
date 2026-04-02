@@ -10,13 +10,13 @@ from pyrogram.types import InputMediaPhoto, InputMediaVideo
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-# --- SECURE CONFIGURATION ---
+# --- CONFIGURATION ---
 load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 
 if not API_ID or not API_HASH:
-    print("❌ FATAL: Check your .env file for API_ID and API_HASH!")
+    print("❌ FATAL: Check your .env file!")
     exit(1)
 
 app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH)
@@ -27,7 +27,7 @@ session = requests.Session()
 # --- HELPERS ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
-    pct = current * 100 / total
+    pct = min(100, current * 100 / total)
     return f"[{'█' * int(pct/10)}{'░' * (10 - int(pct/10))}] {pct:.1f}%"
 
 def get_human_size(num):
@@ -71,7 +71,7 @@ def download_nitro(url, path, headers, size, segs=4):
                 os.remove(pp)
 
 # ==========================================
-# SCRAPER ENGINES (Title & Pagination)
+# SCRAPER ENGINE
 # ==========================================
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
@@ -108,17 +108,17 @@ def get_all_profile_content(username):
     return list(dict.fromkeys(all_links))
 
 # ==========================================
-# DELIVERY ENGINE (V8.35: No thread_id)
+# DELIVERY ENGINE (V8.36: Reliable Video)
 # ==========================================
 async def process_album(client, message, url):
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return
     
     album_id = url.rstrip('/').split('/')[-1]
-    # Reply to the command to stay in the correct Topic
-    status = await client.send_message(message.chat.id, f"🔍 Processing: **{title}**", reply_to_message_id=message.id)
+    status = await client.send_message(message.chat.id, f"🔍 Analyzing: **{title}**", reply_to_message_id=message.id)
     last_edit = [0]
 
+    # 1. Photos
     if photos:
         p_files = []
         for p_idx, p_url in enumerate(photos, 1):
@@ -130,11 +130,14 @@ async def process_album(client, message, url):
                 p_files.append(filepath)
                 if len(p_files) == 10 or p_idx == len(photos):
                     await client.send_media_group(message.chat.id, [InputMediaPhoto(pf, caption=f"🖼 **{title}**") for pf in p_files], reply_to_message_id=message.id)
-                    for pf in p_files: os.remove(pf) if os.path.exists(pf) else None
+                    for pf in p_files: 
+                        if os.path.exists(pf): os.remove(pf)
                     p_files = []
             except: pass
 
+    # 2. Videos (Reliable Payload logic)
     if videos:
+        video_payload = []
         for v_idx, v_url in enumerate(videos, 1):
             filename = v_url.split('/')[-1].split('?')[0]
             filepath = os.path.join(DOWNLOAD_DIR, filename)
@@ -154,9 +157,26 @@ async def process_album(client, message, url):
                 dur, w, h = get_video_meta(filepath)
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.STNULL)
-                await client.send_video(message.chat.id, filepath, thumb=thumb, width=w, height=h, duration=dur, caption=f"🎬 **{title}**\n📦 {get_human_size(size)}", supports_streaming=True, reply_to_message_id=message.id)
-                if os.path.exists(filepath): os.remove(filepath)
-                if os.path.exists(thumb): os.remove(thumb)
+                
+                video_payload.append({
+                    "path": filepath, "thumb": thumb, "w": w, "h": h, "dur": dur,
+                    "cap": f"🎬 **{title}**\n📦 {get_human_size(size)}"
+                })
+
+                if len(video_payload) == 10 or v_idx == len(videos):
+                    await edit_status(status, f"📤 **{title}**\nUploading video batch...", last_edit, force=True)
+                    m_group = [InputMediaVideo(v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, caption=v["cap"]) for v in video_payload]
+                    try:
+                        await client.send_media_group(message.chat.id, m_group, reply_to_message_id=message.id)
+                    except:
+                        # Fallback One-by-One if album fails
+                        for v in video_payload:
+                            await client.send_video(message.chat.id, v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, caption=v["cap"], reply_to_message_id=message.id)
+                    
+                    for v in video_payload:
+                        if os.path.exists(v["path"]): os.remove(v["path"])
+                        if os.path.exists(v["thumb"]): os.remove(v["thumb"])
+                    video_payload = []
             except: pass
 
     await status.delete()
@@ -168,7 +188,10 @@ async def process_album(client, message, url):
 @app.on_message(filters.command("dl", prefixes="."))
 async def dl_handler(client, message):
     urls = list(dict.fromkeys([u.strip() for u in message.text.split('\n') if "erome.com/a/" in u]))
-    for url in urls: await process_album(client, message, url)
+    for url in urls: 
+        await process_album(client, message, url)
+    
+    # NEW: Delete command message ONLY AFTER ALL albums are done
     try: await message.delete()
     except: pass
 
@@ -176,19 +199,30 @@ async def dl_handler(client, message):
 async def user_handler(client, message):
     if len(message.command) < 2: return
     username = message.command[1]
+    
     crawl_msg = await message.reply(f"🕵️‍♂️ **Crawler:** Scanning `{username}`...")
     urls = get_all_profile_content(username)
-    if not urls: return await crawl_msg.edit(f"❌ No content for `{username}`.")
+    
+    if not urls:
+        return await crawl_msg.edit(f"❌ No content for `{username}`.")
+    
     await crawl_msg.edit(f"🚀 Found **{len(urls)}** albums. Sequential mode active...")
+    
     for url in urls:
         await process_album(client, message, url)
         await asyncio.sleep(2)
-    await message.reply(f"🏆 Profile `{username}` complete!")
-    await crawl_msg.delete()
+        
+    await message.reply(f"🏆 Profile archive for `{username}` complete!")
+    
+    # NEW: Cleanup
+    try:
+        await crawl_msg.delete()
+        await message.delete()
+    except: pass
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.35 Online (Topic-Fixed)!")
+        print("LOG: Tobo Pro V8.36 Ready (Reliable Video Fix)!")
         await idle()
 
 if __name__ == "__main__":
