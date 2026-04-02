@@ -25,7 +25,7 @@ data_cache = {}
 # --- HELPERS ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
-    pct = min(100, current * 100 / total)
+    pct = min(100, (current / total) * 100)
     return f"[{'█' * int(pct/10)}{'░' * (10 - int(pct/10))}] {pct:.1f}%"
 
 def get_human_size(num):
@@ -41,13 +41,12 @@ def get_video_meta(video_path):
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8')
         data = json.loads(res)
-        duration = int(float(data['format']['duration']))
+        duration = int(float(data.get('format', {}).get('duration', 0)))
         v = next(s for s in data['streams'] if s['codec_type'] == 'video')
         has_audio = any(s['codec_type'] == 'audio' for s in data['streams'])
         return duration, v['width'], v['height'], has_audio
     except: return 0, 1280, 720, False
 
-# --- ASYNC DOWNLOADER ---
 async def async_download(url, path, referer):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0', 'Referer': referer}
     try:
@@ -61,7 +60,7 @@ async def async_download(url, path, referer):
     return False
 
 # ==========================================
-# ADVANCED ASYNC SCANNER
+# ASYNC SCANNER (THE PART THAT PREVENTS STUCK)
 # ==========================================
 async def full_scan_profile(username, status_msg):
     headers = {
@@ -69,15 +68,15 @@ async def full_scan_profile(username, status_msg):
         'Referer': 'https://www.erome.com/'
     }
     results = {"posts": [], "reposts": []}
-    frames = ["🔍", "🔎", "🛰", "📡", "⚡", "✨"]
+    icons = ["🔍", "🔎", "🛰", "📡", "⚡", "✨"]
     
     async with aiohttp.ClientSession(headers=headers) as session:
         for tab in ["", "/reposts"]:
             page = 1
             key = "posts" if tab == "" else "reposts"
             while True:
-                # Real-time UI Update
-                icon = frames[page % len(frames)]
+                # This part updates Telegram LIVE so you know it's not stuck
+                icon = icons[page % len(icons)]
                 await status_msg.edit_text(
                     f"{icon} **Scanning {username}...**\n\n"
                     f"📝 Posts found: `{len(results['posts'])}` \n"
@@ -87,10 +86,9 @@ async def full_scan_profile(username, status_msg):
                 
                 url = f"https://www.erome.com/{username}{tab}?page={page}"
                 try:
-                    async with session.get(url, timeout=20) as res:
+                    async with session.get(url, timeout=15) as res:
                         if res.status != 200: break
-                        text = await res.text()
-                        soup = BeautifulSoup(text, 'html.parser')
+                        soup = BeautifulSoup(await res.text(), 'html.parser')
                         
                         found_links = []
                         for a in soup.find_all("a", href=True):
@@ -108,12 +106,14 @@ async def full_scan_profile(username, status_msg):
                         if added == 0: break
                         if not soup.find("a", string=re.compile(r"Next", re.I)): break
                         page += 1
-                        await asyncio.sleep(0.2) # High speed
-                except: break
+                        await asyncio.sleep(0.1) # Fast but safe
+                except Exception as e:
+                    print(f"Scan error on page {page}: {e}")
+                    break
     return results
 
 # ==========================================
-# DELIVERY ENGINE
+# DELIVERY & HANDLERS (Same logic, but Async)
 # ==========================================
 async def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0'}
@@ -166,18 +166,13 @@ async def process_album(client, message, url):
                 os.remove(path); os.remove(thumb) if os.path.exists(thumb) else None
     await status.delete()
 
-# ==========================================
-# HANDLERS
-# ==========================================
 @app.on_message(filters.command("user", prefixes="."))
 async def user_cmd(client, message):
     if len(message.command) < 2: return
     input_data = message.command[1].strip()
     username = input_data.split("erome.com/")[-1].split('/')[0].split('?')[0] if "erome.com/" in input_data else input_data
-
-    msg = await message.reply(f"🛰 **Initializing Scanner...**")
     
-    # Start Scan
+    msg = await message.reply(f"🛰 **Connecting to `{username}`...**")
     results = await full_scan_profile(username, msg)
     data_cache[username] = results
     
@@ -185,31 +180,23 @@ async def user_cmd(client, message):
         [InlineKeyboardButton(f"📥 Download Posts ({len(results['posts'])})", callback_data=f"dl_p|{username}")],
         [InlineKeyboardButton(f"🔁 Download Reposts ({len(results['reposts'])})", callback_data=f"dl_r|{username}")]
     ])
-    
-    await msg.edit_text(
-        f"👤 **User:** `{username}`\n\n"
-        f"📝 **Original Posts:** `{len(results['posts'])}` \n"
-        f"🔁 **Reposted Albums:** `{len(results['reposts'])}` \n\n"
-        f"Select an option:",
-        reply_markup=buttons
-    )
+    await msg.edit_text(f"👤 **User:** `{username}`\n📝 Posts: `{len(results['posts'])}` | 🔁 Reposts: `{len(results['reposts'])}`", reply_markup=buttons)
 
 @app.on_callback_query(filters.regex(r"^dl_(p|r)\|"))
 async def handle_dl(client, callback: CallbackQuery):
     action, username = callback.data.split("|")
     key = "posts" if action == "dl_p" else "reposts"
     urls = data_cache.get(username, {}).get(key, [])
-    if not urls: return await callback.answer("❌ No items.", show_alert=True)
-    
+    if not urls: return await callback.answer("❌ No content.", show_alert=True)
     await callback.message.edit_text(f"🚀 **Archiving {len(urls)} items...**")
     for url in urls:
         await process_album(client, callback.message, url)
         await asyncio.sleep(1)
-    await callback.message.reply(f"🏆 Archive complete for `{username}`!")
+    await callback.message.reply(f"🏆 Archive complete!")
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.57 (Full Async) Online!")
+        print("LOG: V8.57 Full Async Ready!")
         await idle()
 
 if __name__ == "__main__":
