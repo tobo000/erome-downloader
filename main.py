@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
-SUDO_USERS = [int(x.strip()) for x in os.getenv("SUDO_USERS", "").split(",")]
+SUDO_USERS = [int(x.strip()) for x in os.getenv("SUDO_USERS", "").split(",") if x.strip().isdigit()]
 
 app = Client("tobo_pro_session", api_id=API_ID, api_hash=API_HASH)
 DOWNLOAD_DIR = "downloads"
