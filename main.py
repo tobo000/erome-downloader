@@ -27,14 +27,14 @@ cancel_tasks = {}
 
 # --- DATABASE ---
 def init_db():
-    conn = sqlite3.connect("bot_archive_v89.db")
+    conn = sqlite3.connect("archive_v89.db")
     cursor = conn.cursor()
     cursor.execute("CREATE TABLE IF NOT EXISTS processed (url TEXT PRIMARY KEY)")
     conn.commit()
     conn.close()
 
 def is_processed(url):
-    conn = sqlite3.connect("bot_archive_v89.db")
+    conn = sqlite3.connect("archive_v89.db")
     cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM processed WHERE url = ?", (url,))
     res = cursor.fetchone()
@@ -42,7 +42,7 @@ def is_processed(url):
     return res is not None
 
 def mark_processed(url):
-    conn = sqlite3.connect("bot_archive_v89.db")
+    conn = sqlite3.connect("archive_v89.db")
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO processed (url) VALUES (?)", (url,))
@@ -50,7 +50,7 @@ def mark_processed(url):
     except: pass
     conn.close()
 
-# --- HELPERS ---
+# --- HELPERS (Animation Restored) ---
 def create_progress_bar(current, total):
     if total == 0: return "[░░░░░░░░░░] 0%"
     pct = (current / total) * 100
@@ -64,7 +64,7 @@ def get_human_size(num):
 
 async def progress_callback(current, total, client, message, start_time, action_text):
     now = time.time()
-    if now - start_time[0] > 4: 
+    if now - start_time[0] > 5: 
         bar = create_progress_bar(current, total)
         try:
             await message.edit_text(f"🚀 **{action_text}**\n\n{bar}\n📦 {get_human_size(current)} / {get_human_size(total)}")
@@ -81,13 +81,9 @@ def get_video_meta(video_path):
         return duration, v['width'], v['height']
     except: return 0, 0, 0
 
-# --- IMPROVED SCRAPER (V8.93) ---
+# --- SCRAPER ---
 async def download_file(url, path):
-    # Added Real User-Agent and Referer
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://www.erome.com/'
-    }
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/120.0.0.0', 'Referer': 'https://www.erome.com/'}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, timeout=600) as r:
@@ -100,12 +96,9 @@ async def download_file(url, path):
     return False
 
 async def get_all_profile_links(username, status_msg):
-    # Standardize username (if user sends a full URL instead of username)
     username = username.split('/')[-1].split('?')[0]
-    
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/120.0.0.0'}
     all_links = []
-    
     async with aiohttp.ClientSession(headers=headers) as session:
         for sub in ["", "/reposts"]:
             page = 1
@@ -114,59 +107,43 @@ async def get_all_profile_links(username, status_msg):
                 async with session.get(url) as r:
                     if r.status != 200: break
                     soup = BeautifulSoup(await r.text(), 'html.parser')
-                    
-                    # More robust album link detection
-                    album_links = []
-                    for a in soup.find_all("a", href=True):
-                        href = a['href']
-                        if "/a/" in href and not any(x in href for x in ["facebook", "twitter", "reddit"]):
-                            full_url = href if href.startswith('http') else 'https://www.erome.com' + href
-                            album_links.append(full_url)
-                    
-                    if not album_links: break
-                    
-                    new_found = False
-                    for link in album_links:
-                        if link not in all_links:
-                            all_links.append(link)
-                            new_found = True
-                    
-                    if not new_found: break # No more new items on this page
-                    
-                    await status_msg.edit_text(f"🕵️‍♂️ Scanning: `{username}`\nSection: {sub if sub else 'Albums'}\nPage: {page}\nItems Found: {len(all_links)}")
-                    
+                    links = [a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href'] and "erome.com" not in a['href']]
+                    if not links: break
+                    new = False
+                    for l in links:
+                        full = 'https://www.erome.com' + l
+                        if full not in all_links: 
+                            all_links.append(full); new = True
+                    if not new: break
+                    await status_msg.edit_text(f"🕵️‍♂️ Scanning: `{username}`\nPage: {page} | Items: {len(all_links)}")
                     if not soup.find("a", string=re.compile("Next", re.I)): break
                     page += 1
-                    await asyncio.sleep(1)
     return list(dict.fromkeys(all_links))
 
 async def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/120.0.0.0'}
     async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(url) as r:
             soup = BeautifulSoup(await r.text(), 'html.parser')
             title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
-            
-            # Videos
             v_l = []
             for v in soup.find_all('video'):
                 src = v.get('src') or v.get('data-src')
                 if not src:
                     st = v.find('source'); src = st.get('src') if st else None
                 if src: v_l.append(src if src.startswith('http') else 'https:' + src)
-            
-            # Photos
             p_l = [img.get('data-src') or img.get('src') for img in soup.select('div.img img') if "erome.com" in (img.get('data-src') or img.get('src', ''))]
-            
             return title, list(dict.fromkeys(p_l)), list(dict.fromkeys(v_l))
 
 # --- CORE ENGINE ---
-async def process_single_album(client, message, url, topic_id):
+async def process_single_album(client, message, url):
     if is_processed(url): return
     title, photos, videos = await scrape_album_details(url)
     if not photos and not videos: return
     album_id = url.rstrip('/').split('/')[-1]
-    status = await client.send_message(message.chat.id, f"📥 **Archiving:** `{title}`", message_thread_id=topic_id)
+    
+    # Send status message as a reply to ensure it stays in the correct topic/chat
+    status = await message.reply(f"📥 **Archiving:** `{title}`")
 
     if photos:
         photo_paths = []
@@ -175,7 +152,9 @@ async def process_single_album(client, message, url, topic_id):
             if await download_file(p_url, path): photo_paths.append(path)
             if len(photo_paths) == 10 or i == len(photos):
                 if photo_paths:
-                    await client.send_media_group(message.chat.id, [InputMediaPhoto(p, caption=f"🖼 {title}") for p in photo_paths], message_thread_id=topic_id)
+                    try:
+                        await client.send_media_group(message.chat.id, [InputMediaPhoto(p, caption=f"🖼 {title}") for p in photo_paths], reply_to_message_id=message.id)
+                    except: pass
                     for p in photo_paths: 
                         if os.path.exists(p): os.remove(p)
                     photo_paths = []
@@ -196,7 +175,7 @@ async def process_single_album(client, message, url, topic_id):
                         duration=dur, width=w, height=h,
                         caption=f"🎬 {title}",
                         supports_streaming=True,
-                        message_thread_id=topic_id,
+                        reply_to_message_id=message.id,
                         progress=progress_callback,
                         progress_args=(client, status, start_time, f"Uploading Video {i}/{len(videos)}")
                     )
@@ -210,13 +189,10 @@ async def process_single_album(client, message, url, topic_id):
 # --- COMMANDS ---
 @app.on_message(filters.command("user", prefixes=".") & filters.user(SUDO_USERS))
 async def user_cmd(client, message):
-    if len(message.command) < 2: 
-        return await message.reply("❌ Usage: `.user [username]`")
-    
+    if len(message.command) < 2: return await message.reply("❌ Usage: `.user [username]`")
     username = message.command[1]
     chat_id = message.chat.id
     cancel_tasks[chat_id] = False
-    topic_id = getattr(message, "message_thread_id", None)
 
     status = await message.reply(
         f"🕵️‍♂️ **Initializing Scanner...**",
@@ -225,18 +201,15 @@ async def user_cmd(client, message):
     
     try:
         urls = await get_all_profile_links(username, status)
-        if not urls:
-            return await status.edit_text(f"❌ No content found for `{username}`. Please check if the username is public and correct.")
+        if not urls: return await status.edit_text(f"❌ No content found for `{username}`.")
         
-        await status.edit_text(f"🚀 Found **{len(urls)}** items. Starting Archive...")
-
+        await status.edit_text(f"🚀 Found **{len(urls)}** items. Archiving...")
         for url in urls:
             if cancel_tasks.get(chat_id):
                 await message.reply("🛑 **Stopped by user.**")
                 break
-            await process_single_album(client, message, url, topic_id)
+            await process_single_album(client, message, url)
             await asyncio.sleep(1)
-
         await status.delete()
         await message.reply(f"🏆 **Archive Finished:** `{username}`")
     except Exception as e:
@@ -244,14 +217,13 @@ async def user_cmd(client, message):
 
 @app.on_callback_query(filters.regex("^stop_"))
 async def stop_callback(client, callback_query: CallbackQuery):
-    chat_id = int(callback_query.data.split("_")[1])
-    cancel_tasks[chat_id] = True
+    cancel_tasks[int(callback_query.data.split("_")[1])] = True
     await callback_query.answer("Stopping archive...", show_alert=True)
 
 async def main():
     init_db()
     async with app:
-        print("LOG: V8.93 Master Edition (Scraper Optimized) Online!")
+        print("LOG: Bot is Online and Ready!")
         await idle()
 
 if __name__ == "__main__":
