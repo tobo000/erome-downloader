@@ -17,7 +17,7 @@ API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 
 if not API_ID or not API_HASH:
-    print("❌ FATAL ERROR: Check your .env file! API_ID or API_HASH is missing.")
+    print("❌ FATAL ERROR: Check your .env file!")
     exit(1)
 
 app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH)
@@ -28,20 +28,17 @@ session = requests.Session()
 
 # --- HELPERS ---
 def create_progress_bar(current, total):
-    """Creates a visual progress bar for status messages"""
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, current * 100 / total)
     return f"[{'█' * int(pct/10)}{'░' * (10 - int(pct/10))}] {pct:.1f}%"
 
 def get_human_size(num):
-    """Converts bytes to a human-readable format (MB, GB, etc.)"""
     for unit in ['B', 'KB', 'MB', 'GB']:
         if abs(num) < 1024.0: return f"{num:3.1f} {unit}"
         num /= 1024.0
     return f"{num:.1f} TB"
 
 async def edit_status(message, text, last_update_time, force=False):
-    """Updates the status message without flooding Telegram servers"""
     now = time.time()
     if force or (now - last_update_time[0] > 4):
         try:
@@ -50,7 +47,6 @@ async def edit_status(message, text, last_update_time, force=False):
         except: pass
 
 def get_video_meta(video_path):
-    """Extracts resolution, duration, and audio track status using FFprobe"""
     if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
         return 0, 1280, 720, False
     try:
@@ -59,14 +55,12 @@ def get_video_meta(video_path):
         data = json.loads(res)
         duration = int(float(data.get('format', {}).get('duration', 0)))
         v = next(s for s in data['streams'] if s['codec_type'] == 'video')
-        # Check if the video has an audio stream
         has_audio = any(s['codec_type'] == 'audio' for s in data['streams'])
         return duration, v.get('width', 1280), v.get('height', 720), has_audio
     except:
         return 0, 1280, 720, False
 
 def download_nitro(url, path, headers, size, segs=4):
-    """Multi-threaded downloader for faster speeds"""
     chunk = size // segs
     def dl_part(s, e, n):
         pp = f"{path}.p{n}"; h = headers.copy(); h['Range'] = f'bytes={s}-{e}'
@@ -91,7 +85,6 @@ def download_nitro(url, path, headers, size, segs=4):
 # SCRAPER ENGINE
 # ==========================================
 def scrape_album_details(url):
-    """Scrapes titles, photos, and video links from the album page"""
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0'}
     try:
         res = session.get(url, headers=headers, timeout=20)
@@ -99,52 +92,62 @@ def scrape_album_details(url):
         title_tag = soup.find("h1") or soup.find("title")
         album_title = title_tag.get_text(strip=True) if title_tag else "Untitled"
         
-        # Scrape Photos
         p_l = list(dict.fromkeys([i.get('data-src') or i.get('src') for i in soup.select('div.img img') if "erome.com" in (i.get('data-src') or i.get('src', ''))]))
         p_l = [x if x.startswith('http') else 'https:' + x for x in p_l if x]
         
-        # Scrape Videos (Deep Scan)
         v_candidates = []
         for tag in soup.find_all(['video', 'source', 'a']):
             src = tag.get('src') or tag.get('data-src') or tag.get('href')
             if src and ".mp4" in src.lower():
                 v_candidates.append(src if src.startswith('http') else 'https:' + src)
-        
         v_candidates.extend(re.findall(r'https?://[^\s"\'>]+\.mp4', res.text))
         v_l = list(dict.fromkeys([v for v in v_candidates if "erome.com" in v]))
-        
-        # Sort to prioritize High Resolution
         v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
-        
-        print(f"LOG: Found {len(p_l)} photos and {len(v_l)} videos in: {album_title}")
         return album_title, p_l, v_l
     except: return "Error", [], []
 
-def get_all_profile_content(username):
-    """Crawls all pages of a user profile (Albums and Reposts)"""
-    headers = {'User-Agent': 'Mozilla/5.0'}
+async def get_all_profile_content(username, status_msg):
+    """Deep Scanner: Loops through every page of Posts and Reposts correctly"""
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0'}
     all_links = []
+    
     for tab in ["", "/reposts"]:
         page = 1
+        tab_name = "Original Posts" if tab == "" else "Reposts"
         while True:
+            # Live Status Update
+            await status_msg.edit_text(f"🕵️‍♂️ **Scanning {username}...**\nSection: `{tab_name}`\nPage: `{page}`\nItems Found: `{len(all_links)}`")
+            
             url = f"https://www.erome.com/{username}{tab}?page={page}"
             try:
                 res = session.get(url, headers=headers, timeout=20)
                 if res.status_code != 200: break
                 soup = BeautifulSoup(res.text, 'html.parser')
-                links = [a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href']]
+                
+                # Find only valid album links
+                links = [a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href'] and "erome.com" not in a['href']]
+                
                 if not links: break
-                for l in links: all_links.append(l if l.startswith('http') else 'https://www.erome.com' + l)
-                if not soup.find("a", string=lambda x: x and "Next" in x): break
+                
+                for l in links:
+                    full_url = 'https://www.erome.com' + l
+                    if full_url not in all_links:
+                        all_links.append(full_url)
+                
+                # Robust 'Next' button detection
+                next_page = soup.find("a", string=re.compile("Next", re.I))
+                if not next_page: break
+                
                 page += 1
+                await asyncio.sleep(0.5) 
             except: break
+            
     return list(dict.fromkeys(all_links))
 
 # ==========================================
 # DELIVERY ENGINE
 # ==========================================
 async def process_album(client, message, url):
-    """Handles the downloading and uploading of a single album"""
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return
     
@@ -152,7 +155,7 @@ async def process_album(client, message, url):
     status = await client.send_message(message.chat.id, f"🔍 **Analyzing:** `{title}`", reply_to_message_id=message.id)
     last_edit = [0]
 
-    # 1. Process Photos
+    # 1. Photos
     if photos:
         p_files = []
         for p_idx, p_url in enumerate(photos, 1):
@@ -168,7 +171,7 @@ async def process_album(client, message, url):
                     p_files = []
             except: pass
 
-    # 2. Process Videos (Force Real Video - No GIFs)
+    # 2. Videos (Real Video Delivery)
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             v_name = v_url.split('/')[-1].split('?')[0]
@@ -187,38 +190,21 @@ async def process_album(client, message, url):
                         for chunk in r.iter_content(chunk_size=1024*1024): f.write(chunk)
                 
                 if not os.path.exists(filepath): continue
-
-                # Get Metadata and check for Audio
                 dur, w, h, has_audio = get_video_meta(filepath)
                 
-                # If silent, add a silent audio track to prevent Telegram from converting it to GIF
                 if not has_audio:
-                    await edit_status(status, f"⚙️ **Processing Video...** (Adding Silent Audio Track)", last_edit, force=True)
                     temp_path = filepath + ".fix.mp4"
-                    # FFmpeg command to add a silent AAC audio track
                     subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp_path, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     if os.path.exists(temp_path):
-                        os.remove(filepath)
-                        os.rename(temp_path, filepath)
+                        os.remove(filepath); os.rename(temp_path, filepath)
                 
-                # Create High-Quality Thumbnail
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
-                # Send as Real Video (with play bar and sound toggle)
-                await client.send_video(
-                    chat_id=message.chat.id,
-                    video=filepath,
-                    thumb=thumb if os.path.exists(thumb) else None,
-                    width=w, height=h, duration=dur,
-                    caption=f"🎬 **{title}**\n📦 {get_human_size(size)}",
-                    supports_streaming=True,
-                    reply_to_message_id=message.id
-                )
+                await client.send_video(message.chat.id, video=filepath, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur, caption=f"🎬 **{title}**\n📦 {get_human_size(size)}", supports_streaming=True, reply_to_message_id=message.id)
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
-            except Exception as e:
-                print(f"Error Processing Video: {e}")
+            except: pass
 
     await status.delete()
     await client.send_message(message.chat.id, f"✅ **COMPLETED:** `{title}`", reply_to_message_id=message.id)
@@ -237,14 +223,20 @@ async def dl_handler(client, message):
 async def user_handler(client, message):
     if len(message.command) < 2: return
     username = message.command[1]
-    crawl_msg = await message.reply(f"🕵️‍♂️ **Crawler:** Scanning profile `{username}`...")
-    urls = get_all_profile_content(username)
-    if not urls: return await crawl_msg.edit(f"❌ No content found for user `{username}`.")
-    await crawl_msg.edit(f"🚀 Found **{len(urls)}** albums. Starting sequential archive...")
+    crawl_msg = await message.reply(f"🕵️‍♂️ **Initializing Scanner for `{username}`...**")
+    
+    urls = await get_all_profile_content(username, crawl_msg)
+    
+    if not urls:
+        return await crawl_msg.edit(f"❌ No content found for `{username}`.")
+    
+    await crawl_msg.edit(f"🚀 Found **{len(urls)}** items (Originals + Reposts).\nStarting sequential archive...")
+    
     for url in urls:
         await process_album(client, message, url)
         await asyncio.sleep(2)
-    await message.reply(f"🏆 Profile archive for `{username}` is complete!")
+        
+    await message.reply(f"🏆 Archive for `{username}` complete! Total items: {len(urls)}")
     try:
         await crawl_msg.delete()
         await message.delete()
@@ -252,7 +244,7 @@ async def user_handler(client, message):
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.48 Online (English Edition)!")
+        print("LOG: Tobo Pro V8.49 Ready (Deep Scanner Fix)!")
         await idle()
 
 if __name__ == "__main__":
