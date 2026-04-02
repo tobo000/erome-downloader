@@ -48,7 +48,6 @@ def get_video_meta(video_path):
         return duration, v['width'], v['height']
     except: return 0, 0, 0
 
-# RESTORED: NITRO SEGMENTED DOWNLOAD (v5.6)
 def download_nitro(url, path, headers, size, segs=4):
     chunk = size // segs
     def dl_part(s, e, n):
@@ -66,15 +65,15 @@ def download_nitro(url, path, headers, size, segs=4):
                 os.remove(pp)
 
 # ==========================================
-# EROME SCRAPER ENGINE
+# DEEP CRAWLER ENGINE (V8.32)
 # ==========================================
 def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     try:
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
-        title_tag = soup.find("h1")
-        album_title = title_tag.get_text(strip=True) if title_tag else "Untitled Album"
+        title_tag = soup.find("h1") or soup.find("title")
+        album_title = title_tag.get_text(strip=True) if title_tag else "Untitled"
         for j in soup.find_all(["div", "section"], {"id": ["related_albums", "comments", "footer"]}): j.decompose()
         v_l = list(dict.fromkeys([next((l for l in [v.get('src'), v.get('data-src')] + [st.get('src') for st in v.find_all('source')] if l and ".mp4" in l.lower()), None) for v in soup.find_all('video') if v]))
         v_l = [x if x.startswith('http') else 'https:' + x for x in v_l if x]
@@ -83,62 +82,74 @@ def scrape_album_details(url):
         return album_title, p_l, v_l
     except: return "Error", [], []
 
-def scrape_profile_albums(username):
-    url = f"https://www.erome.com/{username}"
+def get_all_profile_links(username):
+    """Deep Crawl: Scans main albums AND reposts across all pages."""
     headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        res = session.get(url, headers=headers, timeout=20)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        links = []
-        for a in soup.find_all("a", href=True, class_="album-link"):
-            if "/a/" in a['href']: links.append('https://www.erome.com' + a['href'])
-        return list(dict.fromkeys(links))
-    except: return []
+    all_links = []
+    
+    # Target both Main Albums and Reposts
+    sub_paths = ["", "/reposts"]
+    
+    for sub in sub_paths:
+        page = 1
+        while True:
+            url = f"https://www.erome.com/{username}{sub}?page={page}"
+            try:
+                res = session.get(url, headers=headers, timeout=20)
+                if res.status_code != 200: break
+                soup = BeautifulSoup(res.text, 'html.parser')
+                links = [a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href']]
+                if not links: break
+                
+                for link in links:
+                    full_url = link if link.startswith('http') else 'https://www.erome.com' + link
+                    all_links.append(full_url)
+                
+                # Check if "Next Page" exists
+                if not soup.find("a", string="Next"): break
+                page += 1
+            except: break
+            
+    return list(dict.fromkeys(all_links))
 
 # ==========================================
-# CORE PROCESSING LOGIC
+# REUSABLE DELIVERY ENGINE
 # ==========================================
 async def process_single_album(client, message, url, topic_id):
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return
     
     album_id = url.rstrip('/').split('/')[-1]
-    status_msg = await client.send_message(message.chat.id, f"🔍 Analyzing: **{title}**", reply_to_message_id=message.id)
+    status_msg = await client.send_message(message.chat.id, f"🔍 Crawling: **{title}**", reply_to_message_id=message.id)
     last_edit = [0]
 
-    # 1. PHOTOS (Media Group)
     if photos:
         photo_files = []
         for p_idx, p_url in enumerate(photos, 1):
             filepath = os.path.join(DOWNLOAD_DIR, f"img_{album_id}_{p_idx}.jpg")
-            await edit_status(status_msg, f"📸 **{title}**\nDownloading Photos: {p_idx}/{len(photos)}", last_edit)
+            await edit_status(status_msg, f"📸 **{title}**\nPhoto {p_idx}/{len(photos)}", last_edit)
             try:
                 r = session.get(p_url)
                 with open(filepath, 'wb') as f: f.write(r.content)
                 photo_files.append(filepath)
                 if len(photo_files) == 10 or p_idx == len(photos):
                     await client.send_media_group(message.chat.id, [InputMediaPhoto(pf, caption=f"🖼 **{title}**") for pf in photo_files], reply_to_message_id=message.id)
-                    for pf in photo_files: os.remove(pf)
+                    for pf in photo_files: os.remove(pf) if os.path.exists(pf) else None
                     photo_files = []
             except: pass
 
-    # 2. VIDEOS (NITRO + Media Group Fallback)
     if videos:
-        video_payload = []
         for v_idx, v_url in enumerate(videos, 1):
             filename = v_url.split('/')[-1].split('?')[0]
             filepath = os.path.join(DOWNLOAD_DIR, filename)
             headers = {'User-Agent': 'Mozilla/5.0', 'Referer': url}
-            
             try:
-                # Get size for Nitro decision
                 head = session.head(v_url, headers=headers, allow_redirects=True)
-                size_bytes = int(head.headers.get('content-length', 0))
+                t_s = int(head.headers.get('content-length', 0))
+                await edit_status(status_msg, f"📥 **{title}**\nVideo {v_idx}/{len(videos)}\n{get_human_size(t_s)}", last_edit, force=True)
                 
-                await edit_status(status_msg, f"📥 **{title}**\nVideo {v_idx}/{len(videos)}\nProcessing...", last_edit, force=True)
-                
-                if size_bytes > 15*1024*1024:
-                    download_nitro(v_url, filepath, headers, size_bytes)
+                if t_s > 15*1024*1024:
+                    download_nitro(v_url, filepath, headers, t_s)
                 else:
                     with session.get(v_url, headers=headers, stream=True) as r:
                         with open(filepath, 'wb') as f:
@@ -148,27 +159,16 @@ async def process_single_album(client, message, url, topic_id):
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.STNULL)
                 
-                video_payload.append({"path": filepath, "thumb": thumb, "w": w, "h": h, "dur": dur, "cap": f"🎬 **{title}**\n📦 {get_human_size(size_bytes)}"})
-
-                if len(video_payload) == 10 or v_idx == len(videos):
-                    await edit_status(status_msg, f"📤 **{title}**\nUploading batch to Telegram...", last_edit, force=True)
-                    m_group = [InputMediaVideo(v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], supports_streaming=True, caption=v["cap"]) for v in video_payload]
-                    try:
-                        await client.send_media_group(message.chat.id, m_group, reply_to_message_id=message.id)
-                    except:
-                        for v in video_payload: await client.send_video(message.chat.id, v["path"], thumb=v["thumb"], width=v["w"], height=v["h"], duration=v["dur"], caption=v["cap"], supports_streaming=True, reply_to_message_id=message.id)
-                    
-                    for v in video_payload:
-                        if os.path.exists(v["path"]): os.remove(v["path"])
-                        if os.path.exists(v["thumb"]): os.remove(v["thumb"])
-                    video_payload = []
+                await client.send_video(message.chat.id, filepath, thumb=thumb, width=w, height=h, duration=dur, caption=f"🎬 **{title}**\n📦 {get_human_size(t_s)}", supports_streaming=True, reply_to_message_id=message.id)
+                if os.path.exists(filepath): os.remove(filepath)
+                if os.path.exists(thumb): os.remove(thumb)
             except: pass
 
     await status_msg.delete()
     await client.send_message(message.chat.id, f"✅ **COMPLETED:** `{title}`", reply_to_message_id=message.id)
 
 # ==========================================
-# COMMAND HANDLERS
+# COMMANDS
 # ==========================================
 @app.on_message(filters.command("dl", prefixes="."))
 async def dl_cmd(client, message):
@@ -182,19 +182,24 @@ async def dl_cmd(client, message):
 async def user_cmd(client, message):
     if len(message.command) < 2: return
     username = message.command[1]
-    status = await message.reply(f"🕵️‍♂️ Scraping profile: `{username}`...")
-    urls = scrape_profile_albums(username)
-    if not urls: return await status.edit(f"❌ No albums for `{username}`.")
+    status = await message.reply(f"🕵️‍♂️ **Deep Crawling:** `{username}`\nCollecting all albums + reposts...")
     
-    await status.edit(f"🚀 Found {len(urls)} albums. Processing...")
+    urls = get_all_profile_links(username)
+    if not urls: return await status.edit(f"❌ No content found for `{username}`.")
+    
+    await status.edit(f"🚀 Found **{len(urls)}** items (Originals + Reposts).\nStarting Sequential Archive...")
     topic_id = getattr(message, "message_thread_id", None)
-    for url in urls: await process_single_album(client, message, url, topic_id)
-    await message.reply(f"🏆 Profile `{username}` fully archived!")
+    
+    for url in urls:
+        await process_single_album(client, message, url, topic_id)
+        await asyncio.sleep(3) # Safe delay between albums
+
+    await message.reply(f"🏆 **Mission Complete:** `{username}` fully archived.")
     await status.delete()
 
 async def main():
     async with app:
-        print("LOG: Tobo Pro V8.30 is Online!")
+        print("LOG: V8.32 Deep Crawler is Online!")
         await idle()
 
 if __name__ == "__main__":
