@@ -23,17 +23,6 @@ if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 data_cache = {}
 
 # --- HELPERS ---
-def create_progress_bar(current, total):
-    if total <= 0: return "[░░░░░░░░░░] 0%"
-    pct = min(100, (current / total) * 100)
-    return f"[{'█' * int(pct/10)}{'░' * (10 - int(pct/10))}] {pct:.1f}%"
-
-def get_human_size(num):
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if abs(num) < 1024.0: return f"{num:3.1f} {unit}"
-        num /= 1024.0
-    return f"{num:.1f} TB"
-
 def get_video_meta(video_path):
     if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
         return 0, 1280, 720, False
@@ -48,7 +37,10 @@ def get_video_meta(video_path):
     except: return 0, 1280, 720, False
 
 async def async_download(url, path, referer):
-    headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0', 'Referer': referer}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Referer': referer
+    }
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, timeout=600) as r:
@@ -60,63 +52,78 @@ async def async_download(url, path, referer):
     return False
 
 # ==========================================
-# ASYNC SCANNER (THE PART THAT PREVENTS STUCK)
+# ROBUST ASYNC SCANNER (V8.58)
 # ==========================================
 async def full_scan_profile(username, status_msg):
+    # Headers ថ្មី ដូចមនុស្សប្រើ Browser ចុងក្រោយបំផុត
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Referer': 'https://www.erome.com/'
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.google.com/',
+        'Connection': 'keep-alive'
     }
     results = {"posts": [], "reposts": []}
-    icons = ["🔍", "🔎", "🛰", "📡", "⚡", "✨"]
+    icons = ["🔍", "🔎", "📡", "⚡"]
     
     async with aiohttp.ClientSession(headers=headers) as session:
         for tab in ["", "/reposts"]:
             page = 1
             key = "posts" if tab == "" else "reposts"
             while True:
-                # This part updates Telegram LIVE so you know it's not stuck
                 icon = icons[page % len(icons)]
                 await status_msg.edit_text(
                     f"{icon} **Scanning {username}...**\n\n"
-                    f"📝 Posts found: `{len(results['posts'])}` \n"
-                    f"🔁 Reposts found: `{len(results['reposts'])}` \n\n"
-                    f"*Currently: Analyzing {key} (Page {page})*"
+                    f"📝 Posts: `{len(results['posts'])}` \n"
+                    f"🔁 Reposts: `{len(results['reposts'])}` \n\n"
+                    f"*Reading {key} - Page {page}...*"
                 )
                 
                 url = f"https://www.erome.com/{username}{tab}?page={page}"
                 try:
-                    async with session.get(url, timeout=15) as res:
+                    async with session.get(url, timeout=20) as res:
+                        if res.status == 403:
+                            await status_msg.edit_text(f"❌ **Blocked by Website (403 Forbidden).**\nTry again later or change IP.")
+                            return results
                         if res.status != 200: break
-                        soup = BeautifulSoup(await res.text(), 'html.parser')
                         
+                        html = await res.text()
+                        soup = BeautifulSoup(html, 'html.parser')
+                        
+                        # កែសម្រួល selector ដើម្បីឱ្យចាប់យក Link បានកាន់តែច្បាស់
                         found_links = []
                         for a in soup.find_all("a", href=True):
                             href = a['href']
-                            if "/a/" in href and "erome.com" not in href:
-                                found_links.append('https://www.erome.com' + href if href.startswith('/') else href)
+                            # យកតែ Link អាល់ប៊ុម (/a/xxxx) ដែលមិនមែនជា Link ផ្សាយពាណិជ្ជកម្ម
+                            if "/a/" in href and "erome.com" not in href and not any(x in href for x in ["facebook", "twitter", "share"]):
+                                full_link = 'https://www.erome.com' + href if href.startswith('/') else href
+                                found_links.append(full_link)
                         
                         if not found_links: break
                         
-                        added = 0
+                        added_count = 0
                         for link in found_links:
                             if link not in results[key]:
-                                results[key].append(link); added += 1
+                                results[key].append(link)
+                                added_count += 1
                         
-                        if added == 0: break
+                        if added_count == 0: break # End of content
+                        
+                        # ឆែកមើលប៊ូតុង Next
                         if not soup.find("a", string=re.compile(r"Next", re.I)): break
+                        
                         page += 1
-                        await asyncio.sleep(0.1) # Fast but safe
+                        await asyncio.sleep(1) # បន្ថែមការសម្រាកដើម្បីកុំឱ្យគេ Block
                 except Exception as e:
-                    print(f"Scan error on page {page}: {e}")
+                    print(f"Error: {e}")
                     break
     return results
 
 # ==========================================
-# DELIVERY & HANDLERS (Same logic, but Async)
+# DELIVERY & HANDLERS
 # ==========================================
 async def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/122.0.0.0'}
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(url) as r:
@@ -124,11 +131,7 @@ async def scrape_album_details(url):
                 soup = BeautifulSoup(text, 'html.parser')
                 title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
                 p_l = [i.get('data-src') or i.get('src') for i in soup.select('div.img img') if "erome.com" in (i.get('data-src') or i.get('src', ''))]
-                v_candidates = []
-                for tag in soup.find_all(['video', 'source', 'a']):
-                    src = tag.get('src') or tag.get('data-src') or tag.get('href')
-                    if src and ".mp4" in src.lower(): v_candidates.append(src if src.startswith('http') else 'https:' + src)
-                v_candidates.extend(re.findall(r'https?://[^\s"\'>]+\.mp4', text))
+                v_candidates = re.findall(r'https?://[^\s"\'>]+\.mp4', text)
                 v_l = list(dict.fromkeys([v for v in v_candidates if "erome.com" in v]))
                 v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
                 return title, p_l, v_l
@@ -138,7 +141,7 @@ async def process_album(client, message, url):
     title, photos, videos = await scrape_album_details(url)
     if not photos and not videos: return
     album_id = url.rstrip('/').split('/')[-1]
-    status = await client.send_message(message.chat.id, f"📥 **Analyzing:** `{title}`", reply_to_message_id=message.id)
+    status = await client.send_message(message.chat.id, f"📥 **Archiving:** `{title}`", reply_to_message_id=message.id)
 
     if photos:
         p_files = []
@@ -172,10 +175,13 @@ async def user_cmd(client, message):
     input_data = message.command[1].strip()
     username = input_data.split("erome.com/")[-1].split('/')[0].split('?')[0] if "erome.com/" in input_data else input_data
     
-    msg = await message.reply(f"🛰 **Connecting to `{username}`...**")
+    msg = await message.reply(f"🛰 **Scanning profile:** `{username}`...")
     results = await full_scan_profile(username, msg)
-    data_cache[username] = results
     
+    if not results["posts"] and not results["reposts"]:
+        return # Message already updated in full_scan_profile if error
+        
+    data_cache[username] = results
     buttons = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"📥 Download Posts ({len(results['posts'])})", callback_data=f"dl_p|{username}")],
         [InlineKeyboardButton(f"🔁 Download Reposts ({len(results['reposts'])})", callback_data=f"dl_r|{username}")]
@@ -187,16 +193,16 @@ async def handle_dl(client, callback: CallbackQuery):
     action, username = callback.data.split("|")
     key = "posts" if action == "dl_p" else "reposts"
     urls = data_cache.get(username, {}).get(key, [])
-    if not urls: return await callback.answer("❌ No content.", show_alert=True)
-    await callback.message.edit_text(f"🚀 **Archiving {len(urls)} items...**")
+    if not urls: return await callback.answer("❌ Empty.", show_alert=True)
+    await callback.message.edit_text(f"🚀 Archiving `{username}` {key}...")
     for url in urls:
         await process_album(client, callback.message, url)
         await asyncio.sleep(1)
-    await callback.message.reply(f"🏆 Archive complete!")
+    await callback.message.reply(f"🏆 Archive complete for {username}!")
 
 async def main():
     async with app:
-        print("LOG: V8.57 Full Async Ready!")
+        print("LOG: V8.58 Online!")
         await idle()
 
 if __name__ == "__main__":
