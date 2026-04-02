@@ -1,44 +1,67 @@
 import os
 import asyncio
-import requests
+import aiohttp
+import aiofiles
 import time
 import subprocess
 import json
+import sqlite3
 from bs4 import BeautifulSoup
 from pyrogram import Client, filters, idle
-from pyrogram.types import InputMediaPhoto
-from concurrent.futures import ThreadPoolExecutor
+from pyrogram.types import InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from dotenv import load_dotenv
 
-# --- LOAD CONFIGURATION FROM .env ---
+# --- CONFIGURATION ---
 load_dotenv()
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
+SUDO_USERS = [int(x.strip()) for x in os.getenv("SUDO_USERS", "").split(",")]
 
 app = Client("tobo_pro_session", api_id=API_ID, api_hash=API_HASH)
 DOWNLOAD_DIR = "downloads"
+if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 
-if not os.path.exists(DOWNLOAD_DIR): 
-    os.makedirs(DOWNLOAD_DIR)
+# Global tracker for stop button
+cancel_tasks = {}
 
-session = requests.Session()
+# --- DATABASE (Prevents Duplicates) ---
+def init_db():
+    conn = sqlite3.connect("archive_data.db")
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE IF NOT EXISTS processed (url TEXT PRIMARY KEY)")
+    conn.commit()
+    conn.close()
 
-# --- HELPERS ---
+def is_processed(url):
+    conn = sqlite3.connect("archive_data.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM processed WHERE url = ?", (url,))
+    res = cursor.fetchone()
+    conn.close()
+    return res is not None
 
-def get_human_size(num):
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if abs(num) < 1024.0: return f"{num:3.1f} {unit}"
-        num /= 1024.0
-    return f"{num:.1f} TB"
+def mark_processed(url):
+    conn = sqlite3.connect("archive_data.db")
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO processed (url) VALUES (?)", (url,))
+        conn.commit()
+    except: pass
+    conn.close()
 
-async def edit_status(message, text, last_update_time, force=False):
-    now = time.time()
-    if force or (now - last_update_time[0] > 3):
-        try:
-            await message.edit_text(text)
-            last_update_time[0] = now
-        except: 
-            pass
+# --- DOWNLOADING ENGINE ---
+async def download_file(url, path):
+    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.erome.com/'}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=600) as r:
+                if r.status == 200:
+                    async with aiofiles.open(path, mode='wb') as f:
+                        async for chunk in r.content.iter_chunked(1024*1024):
+                            await f.write(chunk)
+                    return True
+    except: pass
+    return False
 
 def get_video_meta(video_path):
     try:
@@ -48,194 +71,149 @@ def get_video_meta(video_path):
         duration = int(float(data['format']['duration']))
         v = next(s for s in data['streams'] if s['codec_type'] == 'video')
         return duration, v['width'], v['height']
-    except: 
-        return 0, 0, 0
+    except: return 0, 0, 0
 
-def download_nitro(url, path, headers, size, segs=4):
-    chunk = size // segs
-    def dl_part(s, e, n):
-        part_path = f"{path}.p{n}"
-        h = headers.copy()
-        h['Range'] = f'bytes={s}-{e}'
-        with session.get(url, headers=h, stream=True) as r:
-            with open(part_path, 'wb') as f:
-                for chk in r.iter_content(chunk_size=1024*1024):
-                    f.write(chk)
-
-    with ThreadPoolExecutor(max_workers=segs) as ex:
-        futures = []
-        for i in range(segs):
-            start = i * chunk
-            end = (i + 1) * chunk - 1 if i < segs - 1 else size - 1
-            futures.append(ex.submit(dl_part, start, end, i))
-        for future in futures:
-            future.result()
-
-    with open(path, 'wb') as f:
-        for i in range(segs):
-            part_path = f"{path}.p{i}"
-            if os.path.exists(part_path):
-                with open(part_path, 'rb') as pf: 
-                    f.write(pf.read())
-                os.remove(part_path)
-
-# --- SCRAPER ENGINE ---
-
-def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
-    try:
-        res = session.get(url, headers=headers, timeout=20)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        title_tag = soup.find("h1") or soup.find("title")
-        album_title = title_tag.get_text(strip=True) if title_tag else "Untitled Album"
-        
-        # Videos
-        video_links = []
-        for v in soup.find_all('video'):
-            source = v.find('source')
-            src = v.get('src') or v.get('data-src') or (source.get('src') if source else None)
-            if src and ".mp4" in src.lower():
-                video_links.append(src if src.startswith('http') else 'https:' + src)
-        video_links = list(dict.fromkeys(video_links))
-
-        # Photos
-        photo_links = []
-        for i in soup.select('div.img img'):
-            src = i.get('data-src') or i.get('src')
-            if src and "erome.com" in src:
-                photo_links.append(src if src.startswith('http') else 'https:' + src)
-        photo_links = list(dict.fromkeys(photo_links))
-
-        return album_title, photo_links, video_links
-    except Exception as e:
-        print(f"Scrape Error: {e}")
-        return "Error", [], []
-
-def get_all_profile_links(username):
-    """Crawl Original Albums AND Reposts across all pages"""
+# --- DEEP SCRAPER (V8.50) ---
+async def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0'}
-    all_links = []
-    sub_paths = ["", "/reposts"]
-
-    for sub in sub_paths:
-        page = 1
-        while True:
-            url = f"https://www.erome.com/{username}{sub}?page={page}"
-            try:
-                res = session.get(url, headers=headers, timeout=20)
-                if res.status_code != 200: break
-                soup = BeautifulSoup(res.text, 'html.parser')
-                links = [a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href']]
-                if not links: break
-                
-                for link in links:
-                    full_url = link if link.startswith('http') else 'https://www.erome.com' + link
-                    all_links.append(full_url)
-                
-                if not soup.find("a", string="Next"): break
-                page += 1
-            except: break
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as r:
+            soup = BeautifulSoup(await r.text(), 'html.parser')
+            title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
             
-    return list(dict.fromkeys(all_links))
+            # Find all possible video links
+            v_links = []
+            for v in soup.find_all('video'):
+                src = v.get('src') or v.get('data-src')
+                if not src:
+                    st = v.find('source')
+                    if st: src = st.get('src') or st.get('data-src')
+                if src:
+                    v_links.append(src if src.startswith('http') else 'https:' + src)
 
-# --- PROCESSING ENGINE ---
+            # Find all image links
+            p_links = []
+            for img in soup.select('div.img img'):
+                src = img.get('data-src') or img.get('src')
+                if src and "erome.com" in src:
+                    p_links.append(src if src.startswith('http') else 'https:' + src)
+            
+            return title, list(dict.fromkeys(p_links)), list(dict.fromkeys(v_links))
 
-async def process_single_album(client, message, url, topic_id):
-    title, photos, videos = scrape_album_details(url)
+async def get_all_profile_links(username, status_msg):
+    """Robust crawler for both Albums and Reposts"""
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    all_urls = []
+    
+    async with aiohttp.ClientSession() as session:
+        for sub in ["", "/reposts"]:
+            label = "Originals" if sub == "" else "Reposts"
+            page = 1
+            while True:
+                await status_msg.edit_text(f"🕵️‍♂️ Scanning `{username}`\nSection: **{label}**\nPage: **{page}**\nFound: {len(all_urls)} items")
+                url = f"https://www.erome.com/{username}{sub}?page={page}"
+                
+                async with session.get(url, headers=headers) as r:
+                    if r.status != 200: break
+                    soup = BeautifulSoup(await r.text(), 'html.parser')
+                    
+                    # Extract album links
+                    links = [a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href']]
+                    if not links: break
+                    
+                    for l in links:
+                        full_url = l if l.startswith('http') else 'https://www.erome.com' + l
+                        if full_url not in all_urls:
+                            all_urls.append(full_url)
+                    
+                    # Look for Next button
+                    if not soup.find("a", string="Next"): break
+                    page += 1
+                    await asyncio.sleep(0.5) # Anti-ban delay
+    return all_urls
+
+# --- CORE ENGINE ---
+async def process_single_album(client, chat_id, url, topic_id):
+    if is_processed(url): return
+    
+    title, photos, videos = await scrape_album_details(url)
     if not photos and not videos: return
-
+    
     album_id = url.rstrip('/').split('/')[-1]
-    status_msg = await client.send_message(message.chat.id, f"🔍 **Crawling:** {title}", message_thread_id=topic_id)
-    last_edit = [0]
+    progress = await client.send_message(chat_id, f"📥 **Archiving:** `{title}`\n(📸 {len(photos)} | 🎬 {len(videos)})", message_thread_id=topic_id)
 
-    if photos:
-        photo_files = []
-        for p_idx, p_url in enumerate(photos, 1):
-            filepath = os.path.join(DOWNLOAD_DIR, f"img_{album_id}_{p_idx}.jpg")
-            await edit_status(status_msg, f"📸 **{title}**\nPhoto {p_idx}/{len(photos)}", last_edit)
+    # Photos
+    photo_paths = []
+    for i, p_url in enumerate(photos, 1):
+        path = os.path.join(DOWNLOAD_DIR, f"{album_id}_p{i}.jpg")
+        if await download_file(p_url, path):
+            photo_paths.append(path)
+        if len(photo_paths) == 10 or i == len(photos):
+            if photo_paths:
+                try:
+                    await client.send_media_group(chat_id, [InputMediaPhoto(p, caption=f"🖼 {title}") for p in photo_paths], message_thread_id=topic_id)
+                except: pass
+                for p in photo_paths: 
+                    if os.path.exists(p): os.remove(p)
+                photo_paths = []
+
+    # Videos
+    for i, v_url in enumerate(videos, 1):
+        path = os.path.join(DOWNLOAD_DIR, f"{album_id}_v{i}.mp4")
+        if await download_file(v_url, path):
+            dur, w, h = get_video_meta(path)
+            thumb = path + ".jpg"
+            subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', path, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.STNULL)
             try:
-                r = session.get(p_url)
-                with open(filepath, 'wb') as f: f.write(r.content)
-                photo_files.append(filepath)
-                if len(photo_files) == 10 or p_idx == len(photos):
-                    await client.send_media_group(message.chat.id, [InputMediaPhoto(pf, caption=f"🖼 **{title}**") for pf in photo_files], message_thread_id=topic_id)
-                    for pf in photo_files: 
-                        if os.path.exists(pf): os.remove(pf)
-                    photo_files = []
+                await client.send_video(chat_id, path, thumb=thumb, duration=dur, width=w, height=h, caption=f"🎬 {title}", supports_streaming=True, message_thread_id=topic_id)
             except: pass
+            if os.path.exists(path): os.remove(path)
+            if os.path.exists(thumb): os.remove(thumb)
 
-    if videos:
-        for v_idx, v_url in enumerate(videos, 1):
-            filename = v_url.split('/')[-1].split('?')[0]
-            filepath = os.path.join(DOWNLOAD_DIR, f"{album_id}_{filename}")
-            headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.erome.com/'}
-            try:
-                head = session.head(v_url, headers=headers, allow_redirects=True)
-                file_size = int(head.headers.get('content-length', 0))
-                await edit_status(status_msg, f"📥 **{title}**\nVideo {v_idx}/{len(videos)}\nSize: {get_human_size(file_size)}", last_edit, force=True)
-                
-                if file_size > 15*1024*1024:
-                    download_nitro(v_url, filepath, headers, file_size)
-                else:
-                    with session.get(v_url, headers=headers, stream=True) as r:
-                        with open(filepath, 'wb') as f:
-                            for chunk in r.iter_content(chunk_size=1024*1024): f.write(chunk)
-                
-                duration, width, height = get_video_meta(filepath)
-                thumb = filepath + ".jpg"
-                subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.STNULL)
-                
-                await client.send_video(
-                    chat_id=message.chat.id, 
-                    video=filepath, 
-                    thumb=thumb, 
-                    width=width, 
-                    height=height, 
-                    duration=duration, 
-                    caption=f"🎬 **{title}**\n📦 {get_human_size(file_size)}", 
-                    supports_streaming=True, 
-                    message_thread_id=topic_id
-                )
-                if os.path.exists(filepath): os.remove(filepath)
-                if os.path.exists(thumb): os.remove(thumb)
-            except: pass
+    mark_processed(url)
+    await progress.delete()
 
-    await status_msg.delete()
-
-# --- BOT COMMANDS ---
-
-@app.on_message(filters.command("dl", prefixes="."))
-async def dl_cmd(client, message):
-    urls = list(dict.fromkeys([u.strip() for u in message.text.split('\n') if "erome.com/a/" in u]))
-    topic_id = getattr(message, "message_thread_id", None)
-    for url in urls: 
-        await process_single_album(client, message, url, topic_id)
-    try: await message.delete()
-    except: pass
-
-@app.on_message(filters.command("user", prefixes="."))
+# --- COMMANDS ---
+@app.on_message(filters.command("user", prefixes=".") & filters.user(SUDO_USERS))
 async def user_cmd(client, message):
     if len(message.command) < 2: return
     username = message.command[1]
-    status = await message.reply(f"🕵️‍♂️ **Deep Crawling:** `{username}`\nCollecting all albums (Originals + Reposts)...")
-    
-    urls = get_all_profile_links(username)
-    if not urls: 
-        return await status.edit(f"❌ No content found for `{username}`.")
-
-    await status.edit(f"🚀 Found **{len(urls)} items**. Starting download...")
+    chat_id = message.chat.id
+    cancel_tasks[chat_id] = False
     topic_id = getattr(message, "message_thread_id", None)
 
-    for url in urls:
-        await process_single_album(client, message, url, topic_id)
-        await asyncio.sleep(2) 
+    status = await message.reply(
+        f"🕵️‍♂️ **Deep Crawl Starting...**",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Stop Archiving", callback_query_data=f"stop_{chat_id}")]])
+    )
 
-    await message.reply(f"🏆 **Mission Complete:** `{username}` fully archived.")
+    # Scrape both originals and reposts
+    urls = await get_all_profile_links(username, status)
+    
+    await status.edit_text(f"🚀 Found **{len(urls)}** items (Albums + Reposts).\nStarting Download Queue...")
+
+    for i, url in enumerate(urls, 1):
+        if cancel_tasks.get(chat_id):
+            await message.reply("🛑 **Archive Stopped by Admin.**")
+            break
+        
+        await process_single_album(client, chat_id, url, topic_id)
+        await asyncio.sleep(1) # Safe interval
+
     await status.delete()
+    await message.reply(f"🏆 **Archive Complete:** `{username}`")
+
+@app.on_callback_query(filters.regex("^stop_"))
+async def stop_callback(client, callback_query: CallbackQuery):
+    chat_id = int(callback_query.data.split("_")[1])
+    cancel_tasks[chat_id] = True
+    await callback_query.answer("Stopping... please wait.", show_alert=True)
+    await callback_query.message.edit_text("🛑 **Stopping... completing current item.**")
 
 async def main():
+    init_db()
     async with app:
-        print("LOG: V8.34 Bot is Online (using .env)!")
+        print("LOG: V8.50 Full Archive is Online!")
         await idle()
 
 if __name__ == "__main__":
