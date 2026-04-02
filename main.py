@@ -6,6 +6,7 @@ import time
 import subprocess
 import json
 import sqlite3
+import re
 from bs4 import BeautifulSoup
 from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -49,10 +50,10 @@ def mark_processed(url):
     except: pass
     conn.close()
 
-# --- HELPERS (Animation & Progress) ---
+# --- HELPERS ---
 def create_progress_bar(current, total):
     if total == 0: return "[░░░░░░░░░░] 0%"
-    pct = current * 100 / total
+    pct = (current / total) * 100
     return f"[{'█' * int(pct/10)}{'░' * (10 - int(pct/10))}] {pct:.1f}%"
 
 def get_human_size(num):
@@ -80,9 +81,13 @@ def get_video_meta(video_path):
         return duration, v['width'], v['height']
     except: return 0, 0, 0
 
-# --- DOWNLOADING ---
+# --- IMPROVED SCRAPER (V8.93) ---
 async def download_file(url, path):
-    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.erome.com/'}
+    # Added Real User-Agent and Referer
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://www.erome.com/'
+    }
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, timeout=600) as r:
@@ -94,50 +99,74 @@ async def download_file(url, path):
     except: return False
     return False
 
-# --- SCRAPER ---
+async def get_all_profile_links(username, status_msg):
+    # Standardize username (if user sends a full URL instead of username)
+    username = username.split('/')[-1].split('?')[0]
+    
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    all_links = []
+    
+    async with aiohttp.ClientSession(headers=headers) as session:
+        for sub in ["", "/reposts"]:
+            page = 1
+            while True:
+                url = f"https://www.erome.com/{username}{sub}?page={page}"
+                async with session.get(url) as r:
+                    if r.status != 200: break
+                    soup = BeautifulSoup(await r.text(), 'html.parser')
+                    
+                    # More robust album link detection
+                    album_links = []
+                    for a in soup.find_all("a", href=True):
+                        href = a['href']
+                        if "/a/" in href and not any(x in href for x in ["facebook", "twitter", "reddit"]):
+                            full_url = href if href.startswith('http') else 'https://www.erome.com' + href
+                            album_links.append(full_url)
+                    
+                    if not album_links: break
+                    
+                    new_found = False
+                    for link in album_links:
+                        if link not in all_links:
+                            all_links.append(link)
+                            new_found = True
+                    
+                    if not new_found: break # No more new items on this page
+                    
+                    await status_msg.edit_text(f"🕵️‍♂️ Scanning: `{username}`\nSection: {sub if sub else 'Albums'}\nPage: {page}\nItems Found: {len(all_links)}")
+                    
+                    if not soup.find("a", string=re.compile("Next", re.I)): break
+                    page += 1
+                    await asyncio.sleep(1)
+    return list(dict.fromkeys(all_links))
+
 async def scrape_album_details(url):
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as r:
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        async with session.get(url) as r:
             soup = BeautifulSoup(await r.text(), 'html.parser')
             title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
+            
+            # Videos
             v_l = []
             for v in soup.find_all('video'):
                 src = v.get('src') or v.get('data-src')
                 if not src:
                     st = v.find('source'); src = st.get('src') if st else None
                 if src: v_l.append(src if src.startswith('http') else 'https:' + src)
+            
+            # Photos
             p_l = [img.get('data-src') or img.get('src') for img in soup.select('div.img img') if "erome.com" in (img.get('data-src') or img.get('src', ''))]
+            
             return title, list(dict.fromkeys(p_l)), list(dict.fromkeys(v_l))
 
-async def get_all_profile_links(username, status_msg):
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    all_links = []
-    async with aiohttp.ClientSession() as session:
-        for sub in ["", "/reposts"]:
-            page = 1
-            while True:
-                await status_msg.edit_text(f"🕵️‍♂️ Scanning: `{username}`\nSection: {sub if sub else 'Albums'}\nPage: {page}\nFound: {len(all_links)}")
-                url = f"https://www.erome.com/{username}{sub}?page={page}"
-                async with session.get(url) as r:
-                    if r.status != 200: break
-                    soup = BeautifulSoup(await r.text(), 'html.parser')
-                    links = [a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href'] and "erome.com" not in a['href']]
-                    if not links: break
-                    for l in links:
-                        full = 'https://www.erome.com' + l
-                        if full not in all_links: all_links.append(full)
-                    if not soup.find("a", string="Next"): break
-                    page += 1
-    return all_links
-
-# --- DELIVERY ---
+# --- CORE ENGINE ---
 async def process_single_album(client, message, url, topic_id):
     if is_processed(url): return
     title, photos, videos = await scrape_album_details(url)
     if not photos and not videos: return
     album_id = url.rstrip('/').split('/')[-1]
-    status = await client.send_message(message.chat.id, f"📥 **Preparing:** `{title}`", message_thread_id=topic_id)
+    status = await client.send_message(message.chat.id, f"📥 **Archiving:** `{title}`", message_thread_id=topic_id)
 
     if photos:
         photo_paths = []
@@ -147,7 +176,8 @@ async def process_single_album(client, message, url, topic_id):
             if len(photo_paths) == 10 or i == len(photos):
                 if photo_paths:
                     await client.send_media_group(message.chat.id, [InputMediaPhoto(p, caption=f"🖼 {title}") for p in photo_paths], message_thread_id=topic_id)
-                    for p in photo_paths: os.remove(p)
+                    for p in photo_paths: 
+                        if os.path.exists(p): os.remove(p)
                     photo_paths = []
 
     if videos:
@@ -180,32 +210,37 @@ async def process_single_album(client, message, url, topic_id):
 # --- COMMANDS ---
 @app.on_message(filters.command("user", prefixes=".") & filters.user(SUDO_USERS))
 async def user_cmd(client, message):
-    if len(message.command) < 2: return
+    if len(message.command) < 2: 
+        return await message.reply("❌ Usage: `.user [username]`")
+    
     username = message.command[1]
     chat_id = message.chat.id
     cancel_tasks[chat_id] = False
     topic_id = getattr(message, "message_thread_id", None)
 
-    # FIXED: Pyrogram uses 'callback_data'
     status = await message.reply(
         f"🕵️‍♂️ **Initializing Scanner...**",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Stop", callback_data=f"stop_{chat_id}")]])
     )
     
-    urls = await get_all_profile_links(username, status)
-    if not urls: return await status.edit_text("❌ No content found.")
-    
-    await status.edit_text(f"🚀 Found **{len(urls)}** items. Starting Archive...")
+    try:
+        urls = await get_all_profile_links(username, status)
+        if not urls:
+            return await status.edit_text(f"❌ No content found for `{username}`. Please check if the username is public and correct.")
+        
+        await status.edit_text(f"🚀 Found **{len(urls)}** items. Starting Archive...")
 
-    for url in urls:
-        if cancel_tasks.get(chat_id):
-            await message.reply("🛑 **Stopped by user.**")
-            break
-        await process_single_album(client, message, url, topic_id)
-        await asyncio.sleep(1)
+        for url in urls:
+            if cancel_tasks.get(chat_id):
+                await message.reply("🛑 **Stopped by user.**")
+                break
+            await process_single_album(client, message, url, topic_id)
+            await asyncio.sleep(1)
 
-    await status.delete()
-    await message.reply(f"🏆 **Archive Finished:** `{username}`")
+        await status.delete()
+        await message.reply(f"🏆 **Archive Finished:** `{username}`")
+    except Exception as e:
+        await status.edit_text(f"❌ Error: {str(e)}")
 
 @app.on_callback_query(filters.regex("^stop_"))
 async def stop_callback(client, callback_query: CallbackQuery):
@@ -216,7 +251,7 @@ async def stop_callback(client, callback_query: CallbackQuery):
 async def main():
     init_db()
     async with app:
-        print("LOG: V8.92 Master Edition (Final Button Fix) is Online!")
+        print("LOG: V8.93 Master Edition (Scraper Optimized) Online!")
         await idle()
 
 if __name__ == "__main__":
