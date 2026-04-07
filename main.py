@@ -13,10 +13,12 @@ from pyrogram.errors import MessageNotModified
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-# --- CONFIGURATION (Keep your original Setup) ---
+# --- CONFIGURATION ---
 load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
+sudo_raw = os.getenv("SUDO_USERS", "")
+SUDO_USERS = [int(x.strip()) for x in sudo_raw.split(",") if x.strip().isdigit()]
 
 app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH)
 DOWNLOAD_DIR = "downloads"
@@ -44,10 +46,12 @@ def is_processed(url):
     return res is not None
 
 def git_sync():
+    """Backup database to GitHub automatically"""
     try:
         subprocess.run(["git", "add", DB_NAME], check=True)
         subprocess.run(["git", "commit", "-m", "Auto-update memory database"], check=True)
         subprocess.run(["git", "push"], check=True)
+        print("LOG: GitHub Backup Successful.")
     except: pass
 
 def mark_processed(url):
@@ -56,11 +60,11 @@ def mark_processed(url):
     try:
         cursor.execute("INSERT INTO processed (url) VALUES (?)", (url,))
         conn.commit()
-        git_sync()
+        git_sync() # Trigger sync
     except: pass
     conn.close()
 
-# --- 2. HELPERS ---
+# --- 2. ANIMATION & METADATA HELPERS ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, (current / total) * 100)
@@ -78,24 +82,48 @@ async def edit_status_safe(message, text):
     except MessageNotModified: pass
     except Exception: pass
 
-async def edit_progress_msg(current, total, status_msg, last_update, action_text):
+async def progress_callback(current, total, client, status_msg, start_time, action_text):
+    """Animation for UPLOADING"""
     now = time.time()
-    if now - last_update[0] > 5: 
+    if now - start_time[0] > 5: 
         bar = create_progress_bar(current, total)
         await edit_status_safe(status_msg, f"🚀 **{action_text}**\n\n{bar}\n📦 **Size:** {get_human_size(current)} / {get_human_size(total)}")
-        last_update[0] = now
+        start_time[0] = now
 
 def get_video_meta(video_path):
+    if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
+        return 0, 1280, 720, False
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8')
         data = json.loads(res)
         duration = int(float(data.get('format', {}).get('duration', 0)))
-        v = next((s for s in data['streams'] if s['codec_type'] == 'video'), {})
-        return duration, int(v.get('width', 1280)), int(v.get('height', 720)), any(s['codec_type'] == 'audio' for s in data['streams'])
+        v_stream = next((s for s in data['streams'] if s['codec_type'] == 'video'), {})
+        return duration, int(v_stream.get('width', 1280)), int(v_stream.get('height', 720)), any(s['codec_type'] == 'audio' for s in data['streams'])
     except: return 0, 1280, 720, False
 
+# --- 3. NITRO DOWNLOAD ENGINE ---
+async def download_with_progress(url, path, headers, size, status_msg, action_text):
+    """Animation for DOWNLOADING (Standard)"""
+    last_update = [time.time()]
+    downloaded = 0
+    try:
+        with requests.get(url, headers=headers, stream=True, timeout=60) as r:
+            with open(path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=1024*1024):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        now = time.time()
+                        if now - last_update[0] > 5:
+                            bar = create_progress_bar(downloaded, size)
+                            await edit_status_safe(status_msg, f"📥 **{action_text}**\n\n{bar}\n📦 **Progress:** {get_human_size(downloaded)} / {get_human_size(size)}")
+                            last_update[0] = now
+        return True
+    except: return False
+
 def download_nitro(url, path, headers, size, segs=4):
+    """Original Nitro Downloader (Multi-threaded)"""
     chunk = size // segs
     def dl_part(s, e, n):
         pp = f"{path}.p{n}"; h = headers.copy(); h['Range'] = f'bytes={s}-{e}'
@@ -111,7 +139,7 @@ def download_nitro(url, path, headers, size, segs=4):
                 with open(pp, 'rb') as pf: f.write(pf.read()); os.remove(pp)
 
 # ==========================================
-# IMPROVED SCANNER (V8.93: Smart Detection)
+# SCRAPER & SCANNER (Deep Discovery)
 # ==========================================
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0', 'Referer': 'https://www.erome.com/'}
@@ -127,12 +155,9 @@ def scrape_album_details(url):
     except: return "Error", [], []
 
 async def scan_all_content(username, status_msg):
-    # Auto-extract username from URL if necessary
-    username = username.split('/')[-1].split('?')[0]
-    
+    username = username.split('/')[-1].split('?')[0] # Clean username
     all_links = []
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36', 'Referer': 'https://www.erome.com/'}
-    
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/122.0.0.0', 'Referer': 'https://www.erome.com/'}
     for tab in ["", "/reposts"]:
         page = 1
         while True:
@@ -141,31 +166,20 @@ async def scan_all_content(username, status_msg):
             try:
                 res = session.get(url, headers=headers, timeout=20)
                 if res.status_code != 200: break
-                
-                # Method 1: Find album links via Regex (Very strong)
                 album_ids = re.findall(r'/a/([a-zA-Z0-9]+)', res.text)
-                
                 if not album_ids: break
-                
                 found_new = 0
                 for aid in album_ids:
-                    full_url = f"https://www.erome.com/a/{aid}"
-                    if full_url not in all_links:
-                        all_links.append(full_url)
-                        found_new += 1
-                
-                if found_new == 0: break # No more new items on this page
-                
-                # Check for "Next" button text in HTML
-                if "Next" not in res.text: break
-                
+                    f_url = f"https://www.erome.com/a/{aid}"
+                    if f_url not in all_links: all_links.append(f_url); found_new += 1
+                if found_new == 0 or "Next" not in res.text: break
                 page += 1
                 await asyncio.sleep(0.5)
             except: break
     return all_links
 
 # ==========================================
-# DELIVERY ENGINE
+# DELIVERY ENGINE (The Integrated Logic)
 # ==========================================
 async def process_album(client, message, url, username, current, total):
     album_id = url.rstrip('/').split('/')[-1]
@@ -183,7 +197,7 @@ async def process_album(client, message, url, username, current, total):
         p_paths = []
         for i, p_url in enumerate(photos, 1):
             p = os.path.join(user_folder, f"img_{album_id}_{i}.jpg")
-            with open(p, 'wb') as f: f.write(requests.get(p_url).content)
+            r = requests.get(p_url); open(p, 'wb').write(r.content)
             p_paths.append(p)
             if len(p_paths) == 10 or i == len(photos):
                 await message.reply_media_group([InputMediaPhoto(pf, caption=f"🖼 {title}") for pf in p_paths])
@@ -197,16 +211,15 @@ async def process_album(client, message, url, username, current, total):
             try:
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
+                
                 if size > 15*1024*1024:
-                    await status.edit_text(f"📥 **[{current}/{total}]** Nitro Downloading Video...")
+                    await edit_status_safe(status, f"📥 **[{current}/{total}]** Nitro Downloading Video {i}...")
                     download_nitro(v_url, filepath, headers, size)
                 else:
-                    with requests.get(v_url, headers=headers, stream=True) as r:
-                        with open(filepath, 'wb') as f:
-                            for chunk in r.iter_content(chunk_size=1024*1024): f.write(chunk)
+                    await download_with_progress(v_url, filepath, headers, size, status, f"Downloading Video {i}")
                 
                 dur, w, h, audio = get_video_meta(filepath)
-                if not audio:
+                if not audio: # Silent Audio Injection Fix
                     temp = filepath + ".fix.mp4"
                     subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     os.remove(filepath); os.rename(temp, filepath)
@@ -215,7 +228,7 @@ async def process_album(client, message, url, username, current, total):
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
                 start_time = [time.time()]
-                await message.reply_video(filepath, thumb=thumb, duration=dur, width=w, height=h, caption=f"🎬 {title}", supports_streaming=True, progress=edit_progress_msg, progress_args=(status, start_time, "Uploading Video"))
+                await message.reply_video(filepath, thumb=thumb, duration=dur, width=w, height=h, caption=f"🎬 {title}", supports_streaming=True, progress=progress_callback, progress_args=(client, status, start_time, "Uploading Video"))
                 os.remove(filepath); os.remove(thumb)
             except: pass
     
@@ -226,7 +239,7 @@ async def process_album(client, message, url, username, current, total):
 # ==========================================
 # COMMAND HANDLERS
 # ==========================================
-@app.on_message(filters.command("user", prefixes="."))
+@app.on_message(filters.command("user", prefixes=".") & filters.user(SUDO_USERS))
 async def user_cmd(client, message):
     if len(message.command) < 2: return
     username = message.command[1].strip()
@@ -235,15 +248,15 @@ async def user_cmd(client, message):
     
     msg = await message.reply(f"🛰 **Scanning profile: {username}...**")
     all_urls = await scan_all_content(username, msg)
-    
-    if not all_urls:
-        return await msg.edit_text(f"❌ No items found for `{username}`. Check if the profile is correct.")
+    if not all_urls: return await msg.edit_text("❌ No items found.")
     
     total = len(all_urls)
     await msg.edit_text(f"✅ Found: `{total}`. Starting archive...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{chat_id}")]]))
     
     for i, url in enumerate(all_urls, 1):
-        if cancel_tasks.get(chat_id): break
+        if cancel_tasks.get(chat_id): 
+            await message.reply("🛑 Stopped by Admin.")
+            break
         await process_album(client, message, url, username, i, total)
     
     await msg.delete(); await message.reply(f"🏆 Done for `{username}`!")
@@ -251,9 +264,9 @@ async def user_cmd(client, message):
 @app.on_callback_query(filters.regex(r"^stop_task\|"))
 async def handle_stop(client, callback: CallbackQuery):
     cancel_tasks[int(callback.data.split("|")[1])] = True
-    await callback.answer("Stopping.")
+    await callback.answer("Halting archive...")
 
-@app.on_message(filters.command("dl", prefixes="."))
+@app.on_message(filters.command("dl", prefixes=".") & filters.user(SUDO_USERS))
 async def dl_handler(client, message):
     urls = list(dict.fromkeys([u.strip() for u in message.text.split('\n') if "erome.com/a/" in u]))
     for i, url in enumerate(urls, 1): 
@@ -264,7 +277,7 @@ async def dl_handler(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: V8.93 (Deep Scan Fix) Online!")
+        print("LOG: Tobo Master V8.95 ULTIMATE ONLINE!")
         await idle()
 
 if __name__ == "__main__":
