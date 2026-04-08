@@ -23,8 +23,9 @@ if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 session = requests.Session()
 
 cancel_tasks = {}
+executor = ThreadPoolExecutor(max_workers=4)
 
-# --- 1. DATABASE (Anti-Duplicate) ---
+# --- 1. DATABASE ---
 def init_db():
     conn = sqlite3.connect("bot_archive.db")
     cursor = conn.cursor()
@@ -49,7 +50,7 @@ def mark_processed(album_id):
     except: pass
     conn.close()
 
-# --- 2. HELPERS (Animation & Metadata) ---
+# --- 2. HELPERS (Optimized for 1000+ items) ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, (current / total) * 100)
@@ -63,7 +64,8 @@ def get_human_size(num):
 
 async def edit_progress_msg(current, total, status_msg, last_update, action_text):
     now = time.time()
-    if now - last_update[0] > 5: # Update every 5s to avoid FloodWait
+    # [OPTIMIZED] Update every 8 seconds to prevent Telegram blocking for 1000+ tasks
+    if now - last_update[0] > 8: 
         bar = create_progress_bar(current, total)
         try:
             await status_msg.edit_text(f"🚀 **{action_text}**\n\n{bar}\n📦 **Size:** {get_human_size(current)} / {get_human_size(total)}")
@@ -80,23 +82,17 @@ def get_video_meta(video_path):
         duration = int(float(data.get('format', {}).get('duration', 0)))
         streams = data.get('streams', [])
         v = next((s for s in streams if s['codec_type'] == 'video'), {})
-        width = int(v.get('width', 1280))
-        height = int(v.get('height', 720))
-        has_audio = any(s['codec_type'] == 'audio' for s in streams)
-        return duration, width, height, has_audio
+        return duration, int(v.get('width', 1280)), int(v.get('height', 720)), any(s['codec_type'] == 'audio' for s in streams)
     except: return 0, 1280, 720, False
 
-# --- 3. DOWNLOAD ENGINE (With Progress Bar) ---
 async def download_with_progress(url, path, headers, size, status_msg, action_text):
-    last_update = [time.time()]
-    downloaded = 0
+    last_update = [time.time()]; downloaded = 0
     try:
-        with requests.get(url, headers=headers, stream=True, timeout=60) as r:
+        with requests.get(url, headers=headers, stream=True, timeout=30) as r:
             with open(path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=1024*1024):
                     if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
+                        f.write(chunk); downloaded += len(chunk)
                         await edit_progress_msg(downloaded, size, status_msg, last_update, action_text)
         return True
     except: return False
@@ -106,7 +102,7 @@ def download_nitro(url, path, headers, size, segs=4):
     def dl_part(s, e, n):
         pp = f"{path}.p{n}"; h = headers.copy(); h['Range'] = f'bytes={s}-{e}'
         try:
-            with requests.get(url, headers=h, stream=True, timeout=60) as r:
+            with session.get(url, headers=h, stream=True, timeout=60) as r:
                 with open(pp, 'wb') as f:
                     for chk in r.iter_content(chunk_size=1024*1024): f.write(chk)
         except: pass
@@ -143,14 +139,14 @@ def scrape_album_details(url):
 
 async def scan_all_content(username, status_msg):
     all_urls = []
-    headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0'}
     for tab in ["", "/reposts"]:
         page = 1
         while True:
             await status_msg.edit_text(f"🔍 **Scanning `{username}`...**\n🚀 Found: `{len(all_urls)}` items\n📄 Page: {page}")
             url = f"https://www.erome.com/{username}{tab}?page={page}"
             try:
-                res = session.get(url, headers=headers, timeout=20)
+                res = session.get(url, timeout=20)
                 if res.status_code != 200: break
                 html = res.text
                 album_ids = re.findall(r'/a/([a-zA-Z0-9]+)', html)
@@ -161,14 +157,14 @@ async def scan_all_content(username, status_msg):
                     if f_url not in all_urls: all_urls.append(f_url); new += 1
                 if new == 0 or "Next" not in html: break
                 page += 1
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.6)
             except: break
     return all_urls
 
 # ==========================================
-# DELIVERY ENGINE (V8.86: Full Animation)
+# DELIVERY ENGINE (Stable for 1000+ items)
 # ==========================================
-async def process_album(client, chat_id, reply_id, url, username, current, total, topic_id):
+async def process_album(client, chat_id, reply_id, url, username, current, total):
     album_id = url.rstrip('/').split('/')[-1]
     if is_processed(album_id): return True
 
@@ -180,13 +176,11 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     
     status = await client.send_message(chat_id, f"📥 **[{current}/{total}]** Preparing: `{title}`", reply_to_message_id=reply_id)
 
-    # PHOTOS with Download Animation
+    # Photos
     if photos:
         p_files = []
         for i, p_url in enumerate(photos, 1):
             path = os.path.join(user_folder, f"img_{album_id}_{i}.jpg")
-            # Photo status update
-            await edit_progress_msg(i, len(photos), status, [0], f"Downloading Photo {i}/{len(photos)}")
             try:
                 r = session.get(p_url, timeout=30)
                 with open(path, 'wb') as f: f.write(r.content)
@@ -198,7 +192,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     p_files = []
             except: pass
 
-    # VIDEOS with Download & Upload Animation
+    # Videos
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             v_name = f"{album_id}_v{v_idx}.mp4"
@@ -208,31 +202,29 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
                 
-                # --- DOWNLOAD ANIMATION ---
                 if size > 15*1024*1024:
-                    await status.edit_text(f"📥 **[{current}/{total}]** Nitro Downloading Video {v_idx}...")
+                    await status.edit_text(f"📥 **[{current}/{total}]** Nitro Downloading...")
                     download_nitro(v_url, filepath, headers, size)
                 else:
-                    await download_with_progress(v_url, filepath, headers, size, status, f"Downloading Video {v_idx}/{len(videos)}")
+                    await download_with_progress(v_url, filepath, headers, size, status, f"Downloading Video {v_idx}")
                 
                 if not os.path.exists(filepath) or os.path.getsize(filepath) == 0: continue
 
                 dur, w, h, has_audio = get_video_meta(filepath)
                 if not has_audio:
-                    temp_fix = filepath + ".fix.mp4"
-                    subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp_fix, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    if os.path.exists(temp_fix): os.remove(filepath); os.rename(temp_fix, filepath)
+                    temp_f = filepath + ".fix.mp4"
+                    subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp_f, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if os.path.exists(temp_f): os.remove(filepath); os.rename(temp_f, filepath)
                 
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
-                # --- UPLOAD ANIMATION ---
                 start_time = [time.time()]
                 await client.send_video(
                     chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
                     width=w, height=h, duration=dur, caption=f"🎬 {title}\n📦 {get_human_size(size)}",
                     supports_streaming=True, reply_to_message_id=reply_id,
-                    progress=progress_callback, progress_args=(app, status, start_time, f"Uploading Video {v_idx}")
+                    progress=progress_callback, progress_args=(status, start_time, f"Uploading Video {v_idx}")
                 )
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
@@ -255,7 +247,7 @@ async def user_cmd(client, message):
 
     msg = await message.reply_text(f"🛰 **Scanning profile: {username}...**")
     all_urls = await scan_all_content(username, msg)
-    if not all_urls: return await msg.edit_text(f"❌ No content for `{username}`.")
+    if not all_urls: return await msg.edit_text(f"❌ No content.")
 
     total = len(all_urls)
     await msg.edit_text(f"✅ Found: `{total}` items. Archiving...", 
@@ -263,8 +255,16 @@ async def user_cmd(client, message):
 
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
-        await process_album(client, chat_id, message.id, url, username, i, total, message.message_thread_id)
-        await asyncio.sleep(1)
+        
+        # [NEW] SMART DELAY: prevent VPS from crashing and Telegram from blocking
+        await process_album(client, chat_id, message.id, url, username, i, total)
+        
+        # Rest RAM every 10 albums
+        if i % 10 == 0:
+            await asyncio.sleep(5)
+        else:
+            await asyncio.sleep(1.5)
+
     await msg.delete(); await message.reply_text(f"🏆 Done for `{username}`!")
 
 @app.on_callback_query(filters.regex(r"^stop_task\|"))
@@ -276,14 +276,14 @@ async def handle_stop(client, callback: CallbackQuery):
 async def dl_handler(client, message):
     urls = list(dict.fromkeys([u.strip() for u in message.text.split('\n') if "erome.com/a/" in u]))
     for i, url in enumerate(urls, 1): 
-        await process_album(client, message.chat.id, message.id, url, "general", i, len(urls), message.message_thread_id)
+        await process_album(client, message.chat.id, message.id, url, "general", i, len(urls))
     try: await message.delete()
     except: pass
 
 async def main():
     init_db()
     async with app:
-        print("LOG: V8.86 (Full Animation) Online!")
+        print("LOG: V8.87 Endurance Mode Active!")
         await idle()
 
 if __name__ == "__main__":
