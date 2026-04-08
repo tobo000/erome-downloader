@@ -19,15 +19,17 @@ API_HASH = os.getenv("API_HASH")
 
 app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH)
 DOWNLOAD_DIR = "downloads"
-if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
+if not os.path.exists(DOWNLOAD_DIR): 
+    os.makedirs(DOWNLOAD_DIR)
 session = requests.Session()
 
 cancel_tasks = {}
 
-# --- 1. DATABASE ---
+# --- 1. DATABASE (Fixed Column naming) ---
 def init_db():
     conn = sqlite3.connect("bot_archive.db")
     cursor = conn.cursor()
+    # ធានាថា Column ឈ្មោះ album_id ពិតប្រាកដ
     cursor.execute("CREATE TABLE IF NOT EXISTS processed (album_id TEXT PRIMARY KEY)")
     conn.commit()
     conn.close()
@@ -66,7 +68,7 @@ async def progress_callback(current, total, status_msg, start_time, action_text)
     if now - start_time[0] > 5:
         bar = create_progress_bar(current, total)
         try:
-            await status_msg.edit_text(f"🚀 **{action_text}**\n\n{bar}\n📦 **Size:** {get_human_size(current)} / {get_human_size(total)}")
+            await status_msg.edit_text(f"🚀 {action_text}\n\n{bar}\n📦 Size: {get_human_size(current)} / {get_human_size(total)}")
             start_time[0] = now
         except: pass
 
@@ -98,14 +100,13 @@ def download_nitro(url, path, headers, size, segs=4):
     with ThreadPoolExecutor(max_workers=segs) as ex:
         for i in range(segs):
             start = i * chunk
-            end = (i + 1) * chunk - 1 if i < segs - 1 else size - 1
+            end = (i + 1) * chunk - 1 if i < size - 1 else size - 1
             ex.submit(dl_part, start, end, i)
     with open(path, 'wb') as f:
         for i in range(segs):
             pp = f"{path}.p{i}"
             if os.path.exists(pp):
                 with open(pp, 'rb') as pf: f.write(pf.read()); os.remove(pp)
-
 
 # ==========================================
 # SCRAPER ENGINE
@@ -133,7 +134,7 @@ async def scan_all_content(username, status_msg):
     for tab in ["", "/reposts"]:
         page = 1
         while True:
-            await status_msg.edit_text(f"🔍 **Scanning `{username}`...**\n🚀 Found: `{len(all_urls)}` items\n📄 Page: {page}")
+            await status_msg.edit_text(f"🔍 Scanning {username}...\n🚀 Found: {len(all_urls)} items\n📄 Page: {page}")
             url = f"https://www.erome.com/{username}{tab}?page={page}"
             try:
                 res = session.get(url, headers=headers, timeout=20)
@@ -152,10 +153,12 @@ async def scan_all_content(username, status_msg):
     return all_urls
 
 # ==========================================
-# CORE DELIVERY (V8.83: Final Fix for 0.0B)
+# CORE DELIVERY
 # ==========================================
 async def process_album(client, chat_id, reply_id, url, username, current, total):
     album_id = url.rstrip('/').split('/')[-1]
+    
+    # Check duplicate
     if is_processed(album_id): return True
 
     title, photos, videos = scrape_album_details(url)
@@ -182,15 +185,13 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     p_files = []
             except: pass
 
-
-    # Videos (Improved Size Handling)
+    # Videos
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             v_name = f"{album_id}_v{v_idx}.mp4"
             filepath = os.path.join(user_folder, v_name)
             headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': url}
             try:
-                # Get size via GET stream instead of HEAD to avoid 0.0B
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
                 
@@ -217,7 +218,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 start_time = [time.time()]
                 await client.send_video(
                     chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
-                    width=w, height=h, duration=dur, caption=f"🎬 **{title}**\n📦 {get_human_size(size)}",
+                    width=w, height=h, duration=dur, caption=f"🎬 {title}\n📦 {get_human_size(size)}",
                     supports_streaming=True, reply_to_message_id=reply_id,
                     progress=progress_callback, progress_args=(status, start_time, f"Uploading Video {v_idx}/{len(videos)}")
                 )
@@ -256,9 +257,9 @@ async def user_cmd(client, message):
 
 @app.on_callback_query(filters.regex(r"^stop_task\|"))
 async def handle_stop(client, callback: CallbackQuery):
-    cancel_tasks[int(callback.data.split("|")[1])] = True
+    chat_id = int(callback.data.split("|")[1])
+    cancel_tasks[chat_id] = True
     await callback.answer("🛑 Stopping...", show_alert=True)
-
 
 @app.on_message(filters.command("dl", prefixes="."))
 async def dl_handler(client, message):
@@ -271,7 +272,7 @@ async def dl_handler(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: V8.83 Ready (Fixed 0.0B & Document issue)!")
+        print("LOG: V8.84 Ready (SQLite Fixed)!")
         await idle()
 
 if __name__ == "__main__":
