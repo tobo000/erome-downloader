@@ -6,31 +6,28 @@ import subprocess
 import json
 import re
 import sqlite3
+import random
 from bs4 import BeautifulSoup
-from pyrogram import Client, filters, idle, errors
+from pyrogram import Client, filters, idle
 from pyrogram.types import InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import MessageNotModified, FloodWait
+from pyrogram.errors import MessageNotModified
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-# --- CONFIGURATION (Keep your original Setup) ---
+# --- CONFIGURATION (Keep your Setup) ---
 load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
-sudo_raw = os.getenv("SUDO_USERS", "")
-SUDO_USERS = [int(x.strip()) for x in sudo_raw.split(",") if x.strip().isdigit()]
 
-# [FIX] Added sleep_threshold to handle Telegram flood safely
-app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH, sleep_threshold=60)
+app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH)
 DOWNLOAD_DIR = "downloads"
 if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 session = requests.Session()
 
 cancel_tasks = {}
-# [KEEP OLD CODE] Your original Nitro-style ThreadPool
 executor = ThreadPoolExecutor(max_workers=4)
 
-# --- 1. DATABASE & AUTO-SYNC (Original Logic) ---
+# --- 1. DATABASE & AUTO-SYNC ---
 DB_NAME = "bot_archive.db"
 
 def init_db():
@@ -48,26 +45,20 @@ def is_processed(url):
     conn.close()
     return res is not None
 
-def git_sync():
-    """Automatically backs up memory to GitHub"""
-    try:
-        subprocess.run(["git", "add", DB_NAME], check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Auto-update DB"], check=True, capture_output=True)
-        subprocess.run(["git", "push"], check=True, capture_output=True)
-        print("LOG: GitHub Sync Successful.")
-    except: pass
-
 def mark_processed(url):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO processed (url) VALUES (?)", (url,))
         conn.commit()
-        git_sync() 
+        # [NEW] Silent sync to GitHub
+        subprocess.run(["git", "add", DB_NAME], capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Sync Memory"], capture_output=True)
+        subprocess.run(["git", "push"], capture_output=True)
     except: pass
     conn.close()
 
-# --- 2. HELPERS & ANIMATIONS (Your Original Helpers) ---
+# --- 2. HELPERS (Original Style) ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, (current / total) * 100)
@@ -80,11 +71,9 @@ def get_human_size(num):
     return f"{num:.1f} TB"
 
 async def edit_status_safe(message, text):
-    """Prevents 400 MESSAGE_NOT_MODIFIED error"""
-    try:
-        await message.edit_text(text)
+    try: await message.edit_text(text)
     except MessageNotModified: pass
-    except Exception: pass
+    except: pass
 
 async def progress_callback(current, total, client, status_msg, start_time, action_text):
     now = time.time()
@@ -122,7 +111,7 @@ async def download_with_progress(url, path, headers, size, status_msg, action_te
     except: return False
 
 def download_nitro(url, path, headers, size, segs=4):
-    """[KEEP OLD CODE] Nitro multi-threaded logic"""
+    """[KEEP OLD CODE] Nitro logic preserved"""
     chunk = size // segs
     def dl_part(s, e, n):
         pp = f"{path}.p{n}"; h = headers.copy(); h['Range'] = f'bytes={s}-{e}'
@@ -138,7 +127,7 @@ def download_nitro(url, path, headers, size, segs=4):
                 with open(pp, 'rb') as pf: f.write(pf.read()); os.remove(pp)
 
 # ==========================================
-# SCRAPER ENGINE (V9.02: Original Style)
+# SCRAPER ENGINE (V9.03: Ghost Hunter)
 # ==========================================
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/123.0.0.0', 'Referer': 'https://www.erome.com/'}
@@ -161,7 +150,13 @@ def scrape_album_details(url):
     except: return "Error", [], []
 
 def get_all_profile_content_sync(username, status_msg):
-    headers = {'User-Agent': 'Mozilla/5.0 Chrome/122.0.0.0', 'Referer': 'https://www.erome.com/'}
+    """Refined Stealth Scanner for Sensok/6xyy"""
+    # Use real-world browser headers
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Referer': 'https://www.google.com/',
+        'Accept-Language': 'en-US,en;q=0.9'
+    }
     all_links = []
     for tab in ["", "/reposts"]:
         page = 1
@@ -169,18 +164,33 @@ def get_all_profile_content_sync(username, status_msg):
             url = f"https://www.erome.com/{username}{tab}?page={page}"
             try:
                 res = session.get(url, headers=headers, timeout=20)
+                if res.status_code == 403:
+                    print(f"LOG: Access Denied for {url}")
+                    break
                 if res.status_code != 200: break
+                
+                # Double Discovery: BeautifulSoup + Regex
+                found_on_page = []
+                # Method 1: BS4
                 soup = BeautifulSoup(res.text, 'html.parser')
-                links = [a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href'] and "erome.com" not in a['href']]
-                if not links: break
-                new_found = 0
-                for l in links:
-                    full = 'https://www.erome.com' + l if l.startswith('/') else l
+                found_on_page.extend([a['href'] for a in soup.find_all("a", href=True) if "/a/" in a['href'] and "erome.com" not in a['href']])
+                # Method 2: Regex fallback
+                found_on_page.extend(re.findall(r'href="/a/([a-zA-Z0-9]+)"', res.text))
+
+                if not found_on_page: break
+                
+                added_new = 0
+                for l in found_on_page:
+                    full = f"https://www.erome.com/a/{l}" if not l.startswith('http') else l
                     if full not in all_links:
-                        all_links.append(full); new_found += 1
-                if new_found == 0 or "Next" not in res.text: break
+                        all_links.append(full); added_new += 1
+                
+                # Update Animation during Scan
+                asyncio.run_coroutine_threadsafe(edit_status_safe(status_msg, f"🔍 **Scanning `{username}`...**\n🚀 Found: `{len(all_links)}` items\n📄 Page: {page}"), asyncio.get_event_loop())
+
+                if added_new == 0 or "Next" not in res.text: break
                 page += 1
-                time.sleep(0.5)
+                time.sleep(0.8) # Slow down for stealth
             except: break
     return all_links
 
@@ -207,6 +217,7 @@ async def process_album(client, message, url, username, current, total):
                 await message.reply_media_group([InputMediaPhoto(pf, caption=f"🖼 {title}") for pf in p_paths])
                 for pf in p_paths: os.remove(pf)
                 p_paths = []
+
     if videos:
         for i, v_url in enumerate(videos, 1):
             filepath = os.path.join(user_folder, f"{album_id}_v{i}.mp4")
@@ -215,8 +226,7 @@ async def process_album(client, message, url, username, current, total):
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
                 if size > 15*1024*1024:
-                    await edit_status_safe(status, f"📥 **[{current}/{total}]** Nitro Downloading Video...")
-                    download_nitro(v_url, filepath, headers, size)
+                    await status.edit_text(f"📥 **[{current}/{total}]** Nitro Downloading..."); download_nitro(v_url, filepath, headers, size)
                 else:
                     await download_with_progress(v_url, filepath, headers, size, status, f"Downloading Video {i}")
                 
@@ -239,19 +249,18 @@ async def process_album(client, message, url, username, current, total):
 @app.on_message(filters.command("user", prefixes=".") & filters.user(SUDO_USERS))
 async def user_cmd(client, message):
     if len(message.command) < 2: return
-    
-    # [KEEP OLD] Smart Input support
     raw_input = message.command[1].strip()
-    username = raw_input.split("erome.com/")[-1].split('/')[0].split('?')[0] if "erome.com/" in raw_input else raw_input
-
+    username = raw_input.split("erome.com/")[-1].split('/')[0].split('?')[0]
     chat_id = message.chat.id
     cancel_tasks[chat_id] = False 
-    msg = await message.reply(f"🛰 **Scanning profile: {username}...**")
+    
+    msg = await message.reply(f"🛰 **Initializing Stealth Scanner for: {username}...**")
     
     loop = asyncio.get_event_loop()
     all_urls = await loop.run_in_executor(None, get_all_profile_content_sync, username, msg)
     
-    if not all_urls: return await msg.edit_text(f"❌ No items found for `{username}`.")
+    if not all_urls:
+        return await msg.edit_text(f"❌ No items found for `{username}`. Erome might be blocking the IP.")
     
     total = len(all_urls)
     await msg.edit_text(f"✅ Found: `{total}`. Archiving...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{chat_id}")]]))
@@ -269,15 +278,14 @@ async def handle_stop(client, callback: CallbackQuery):
 @app.on_message(filters.command("dl", prefixes=".") & filters.user(SUDO_USERS))
 async def dl_handler(client, message):
     urls = list(dict.fromkeys([u.strip() for u in message.text.split('\n') if "erome.com/a/" in u]))
-    for i, url in enumerate(urls, 1): 
-        await process_album(client, message, url, "single", i, len(urls))
+    for i, url in enumerate(urls, 1): await process_album(client, message, url, "single", i, len(urls))
     try: await message.delete()
     except: pass
 
 async def main():
     init_db()
     async with app:
-        print("LOG: V9.02 Final Stable Online!")
+        print("LOG: V9.03 Stealth Discovery Online!")
         await idle()
 
 if __name__ == "__main__":
