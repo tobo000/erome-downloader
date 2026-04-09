@@ -7,7 +7,7 @@ import json
 import re
 import sqlite3
 from bs4 import BeautifulSoup
-from pyrogram import Client, filters, idle
+from pyrogram import Client, filters, idle, utils
 from pyrogram.types import InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
@@ -75,9 +75,6 @@ async def update_progress_msg(current, total, status_msg, start_time, action_tex
             start_time[0] = now
         except: pass
 
-async def pyrogram_progress(current, total, status_msg, start_time, action_text):
-    await update_progress_msg(current, total, status_msg, start_time, action_text)
-
 def get_video_meta(video_path):
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
@@ -137,8 +134,6 @@ def scrape_album_details(url):
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
-        
-        # High Res Photos (get data-src for original)
         p_l = []
         for img in soup.select('div.img img'):
             src = img.get('data-src') or img.get('src')
@@ -146,8 +141,6 @@ def scrape_album_details(url):
                 if not src.startswith('http'): src = 'https:' + src
                 p_l.append(src)
         p_l = list(dict.fromkeys(p_l))
-
-        # High Res Videos
         v_candidates = []
         for tag in soup.find_all(['video', 'source', 'a']):
             src = tag.get('src') or tag.get('data-src') or tag.get('href')
@@ -156,9 +149,7 @@ def scrape_album_details(url):
                 v_candidates.append(src)
         v_candidates.extend(re.findall(r'https?://[^\s"\'>]+.mp4', res.text))
         v_l = list(dict.fromkeys([v for v in v_candidates if "erome.com" in v]))
-        # Sort so highest res (1080p, 720p) comes first
         v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
-        
         return title, p_l, v_l
     except: return "Error", [], []
 
@@ -167,6 +158,13 @@ def scrape_album_details(url):
 # ==========================================
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
+    # PEER RESOLUTION FIX
+    try:
+        peer = await client.resolve_peer(chat_id)
+    except Exception:
+        try: await client.get_chat(chat_id)
+        except: pass
+
     album_id = url.rstrip('/').split('/')[-1]
     if is_processed(album_id): return True
     
@@ -174,7 +172,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     if not photos and not videos: return False
     
     user_folder = os.path.join(DOWNLOAD_DIR, username, album_id)
-    if not os.path.exists(user_folder): os.makedirs(user_folder)
+    if not os.path.exists(user_folder): os.makedirs(user_folder, exist_ok=True)
     
     status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Media Group:**\n🖼 {len(photos)} Photos | 🎬 {len(videos)} Videos", reply_to_message_id=reply_id)
     
@@ -188,7 +186,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             r = session.get(p_url, timeout=30)
             with open(path, 'wb') as f: f.write(r.content)
             media_to_send.append(InputMediaPhoto(path))
-            await status.edit_text(f"🖼 **Downloading Photo {i}/{len(photos)}**")
+            if i % 3 == 0: await status.edit_text(f"🖼 **Downloading Photos...** {i}/{len(photos)}")
         except: pass
 
     # 2. Download Videos
@@ -198,7 +196,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
         try:
             with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                 size = int(r.headers.get('content-length', 0))
-            
             if size > 15*1024*1024:
                 await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop)
             else:
@@ -211,69 +208,72 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 subprocess.run(['ffmpeg', '-i', filepath, '-f', 'lavfi', '-i', 'anullsrc', '-c:v', 'copy', '-c:a', 'aac', '-shortest', fix, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if os.path.exists(fix): os.remove(filepath); os.rename(fix, filepath)
             subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
             media_to_send.append(InputMediaVideo(filepath, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur))
         except: pass
 
     # 3. Send as Media Group (Chunks of 10)
     caption = f"🎬 **{title}**\n👤 User: `{username}`\n📦 Total: {len(photos)}🖼 {len(videos)}🎬"
-    start_time = [time.time()]
-
     for i in range(0, len(media_to_send), 10):
         chunk = media_to_send[i:i+10]
-        if i == 0: chunk[0].caption = caption # Set caption on the first item
+        if i == 0: chunk[0].caption = caption
         try:
             await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
-            await status.edit_text(f"📤 **Uploading Media Group...** {i+len(chunk)}/{len(media_to_send)}")
-        except Exception as e:
-            print(f"Group Error: {e}")
+            await status.edit_text(f"📤 **Uploading Group...** {i+len(chunk)}/{len(media_to_send)}")
+        except Exception as e: print(f"Upload Error: {e}")
 
     # Cleanup
-    for f in os.listdir(user_folder): os.remove(os.path.join(user_folder, f))
-    os.rmdir(user_folder)
+    for f in os.listdir(user_folder): 
+        try: os.remove(os.path.join(user_folder, f))
+        except: pass
+    try: os.rmdir(user_folder)
+    except: pass
     mark_processed(album_id)
     await status.delete()
     return True
 
-# --- HANDLERS (Same as your working version) ---
-
-async def scan_all_content(username, status_msg):
-    all_urls = []
-    headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
-    for tab in ["", "/reposts"]:
-        page = 1
-        while True:
-            try: await status_msg.edit_text(f"🔍 Scanning {username}...\n🚀 Found: {len(all_urls)} items\n📄 Page: {page}")
-            except: pass
-            url = f"https://www.erome.com/{username}{tab}?page={page}"
-            try:
-                res = session.get(url, headers=headers, timeout=20)
-                if res.status_code != 200: break
-                html = res.text
-                album_ids = re.findall(r'/a/([a-zA-Z0-9]+)', html)
-                if not album_ids: break
-                for aid in album_ids:
-                    f_url = f"https://www.erome.com/a/{aid}"
-                    if f_url not in all_urls: all_urls.append(f_url)
-                if "Next" not in html: break
-                page += 1
-                await asyncio.sleep(0.5)
-            except: break
-    return all_urls
+# --- HANDLERS ---
 
 @app.on_message(filters.command("user", prefixes="."))
 async def user_cmd(client, message):
     if len(message.command) < 2: return
-    try: await client.get_chat(message.chat.id)
-    except: pass
-    username = message.command[1].strip().split("erome.com/")[-1].split('/')[0]
-    cancel_tasks[message.chat.id] = False
-    msg = await message.reply(f"🛰 **Scanning...**")
-    all_urls = await scan_all_content(username, msg)
-    if not all_urls: return await msg.edit_text(f"❌ No content.")
+    
+    # PEER FIX
+    chat_id = message.chat.id
+    try:
+        await client.get_chat(chat_id)
+    except Exception: pass
+
+    input_data = message.command[1].strip()
+    username = input_data.split("erome.com/")[-1].split('/')[0].split('?')[0] if "erome.com/" in input_data else input_data
+    cancel_tasks[chat_id] = False
+    
+    msg = await message.reply(f"🛰 **Scanning {username}...**")
+    all_urls = []
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
+    
+    for tab in ["", "/reposts"]:
+        page = 1
+        while True:
+            url = f"https://www.erome.com/{username}{tab}?page={page}"
+            try:
+                res = session.get(url, headers=headers, timeout=20)
+                if res.status_code != 200: break
+                ids = re.findall(r'/a/([a-zA-Z0-9]+)', res.text)
+                if not ids: break
+                for aid in ids:
+                    f_url = f"https://www.erome.com/a/{aid}"
+                    if f_url not in all_urls: all_urls.append(f_url)
+                if "Next" not in res.text: break
+                page += 1
+                await msg.edit_text(f"🔍 Found {len(all_urls)} items...")
+            except: break
+    
+    if not all_urls: return await msg.edit_text(f"❌ No content for `{username}`.")
+    
     for i, url in enumerate(all_urls, 1):
-        if cancel_tasks.get(message.chat.id): break
-        await process_album(client, message.chat.id, message.id, url, username, i, len(all_urls))
+        if cancel_tasks.get(chat_id): break
+        await process_album(client, chat_id, message.id, url, username, i, len(all_urls))
+    
     await msg.delete(); await message.reply(f"🏆 Completed `{username}`!")
 
 @app.on_callback_query(filters.regex(r"^stop_task|"))
@@ -284,7 +284,7 @@ async def handle_stop(client, callback: CallbackQuery):
 async def main():
     init_db()
     async with app:
-        print("LOG: Media Group & High Res Version Started!")
+        print("LOG: Peer-Fixed Media Group Version Started!")
         await idle()
 
 if __name__ == "__main__":
