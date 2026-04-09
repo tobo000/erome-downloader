@@ -25,7 +25,7 @@ session = requests.Session()
 
 cancel_tasks = {}
 
-# --- 1. DATABASE ---
+# --- 1. DATABASE (Kept logic) ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -50,7 +50,7 @@ def mark_processed(album_id):
     except: pass
     conn.close()
 
-# --- 2. HELPERS & ANIMATIONS ---
+# --- 2. HELPERS & ANIMATIONS (Kept Moon/Bars) ---
 
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
@@ -93,7 +93,7 @@ def get_video_meta(video_path):
         return duration, width, height
     except: return 0, 1280, 720
 
-# --- 3. DOWNLOAD ENGINES ---
+# --- 3. DOWNLOAD ENGINES (Kept Nitro) ---
 
 def download_nitro_animated(url, path, headers, size, status_msg, loop, segs=4, action="Nitro", topic=""):
     chunk = size // segs
@@ -130,7 +130,7 @@ async def download_with_bar(url, path, headers, size, status_msg, action, topic=
                     f.write(chunk); downloaded += len(chunk)
                     await update_progress_msg(downloaded, size, status_msg, start_time, action, topic)
 
-# --- 4. SCRAPER ---
+# --- 4. SCRAPER (Kept) ---
 
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
@@ -138,7 +138,8 @@ def scrape_album_details(url):
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
-        p_l = ['https:' + x.get('data-src') if x.get('data-src', '').startswith('//') else x.get('data-src') or x.get('src') for x in soup.select('div.img img')]
+        p_l = [img.get('data-src') or img.get('src') for img in soup.select('div.img img')]
+        p_l = ['https:' + x if x.startswith('//') else x for x in p_l if x]
         v_l = []
         for v_tag in soup.find_all(['source', 'video']):
             v_src = v_tag.get('src') or v_tag.get('data-src')
@@ -152,10 +153,8 @@ def scrape_album_details(url):
 # --- 5. CORE DELIVERY ---
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
-    # Peer ID Handshake
     try: await client.get_chat(chat_id)
     except: pass
-
     album_id = url.rstrip('/').split('/')[-1]
     if is_processed(album_id): return True
     
@@ -163,11 +162,14 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     if not photos and not videos: return False
     
     user_folder = os.path.join(DOWNLOAD_DIR, username, album_id)
-    if not os.path.exists(user_folder): os.makedirs(user_folder, exist_ok=True)
+    os.makedirs(user_folder, exist_ok=True)
     
     status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive**\nTopic: `{title}`", reply_to_message_id=reply_id)
-    album_caption = f"🎬 Topic: **{title}**\n👤 User: `{username}`\n📦 Original Quality"
+    album_caption = (f"🎬 Topic: **{title}**\n"
+                     f"👤 User: `{username}`\n"
+                     f"📦 Original Quality")
 
+    # PHOTOS (Group of 10 with Bar)
     if photos:
         photo_media = []
         for i, p_url in enumerate(photos, 1):
@@ -187,6 +189,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
         for f in os.listdir(user_folder):
             if f.startswith("p_"): os.remove(os.path.join(user_folder, f))
 
+    # VIDEOS (One-by-One with Bar)
     if videos:
         loop = asyncio.get_event_loop()
         for v_idx, v_url in enumerate(videos, 1):
@@ -196,14 +199,15 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
+                
                 if size > 15*1024*1024:
                     await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop, 4, action_v, title)
                 else:
                     await download_with_bar(v_url, filepath, headers, size, status, action_v, title)
-                
+
                 if not os.path.exists(filepath): continue
                 
-                # Mobile Playback Fix
+                # Fix for Phone Playback
                 subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-movflags', 'faststart', filepath+'.tmp.mp4', '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if os.path.exists(filepath+'.tmp.mp4'): os.remove(filepath); os.rename(filepath+'.tmp.mp4', filepath)
                 
@@ -211,11 +215,10 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
-                # UPLOAD STAGE
-                await asyncio.sleep(1) # Let system breathe
-                try: await client.get_chat(chat_id) # Handshake before upload
+                # Handshake before Upload
+                try: await client.get_chat(chat_id)
                 except: pass
-
+                
                 start_time_up = [time.time()]
                 await client.send_video(
                     chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
@@ -227,6 +230,9 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
             except: pass
+
+    try: os.rmdir(user_folder)
+    except: pass
     mark_processed(album_id); await status.delete()
     return True
 
@@ -292,7 +298,7 @@ async def user_cmd(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: Uploader Fix & Stable Version Ready!")
+        print("LOG: Ready and Working!")
         await idle()
 
 if __name__ == "__main__":
