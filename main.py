@@ -136,7 +136,9 @@ async def scan_all_content(username, status_msg):
     for tab in ["", "/reposts"]:
         page = 1
         while True:
-            await status_msg.edit_text(f"🔍 Scanning {username}...\n🚀 Found: {len(all_urls)} items\n📄 Page: {page}")
+            try:
+                await status_msg.edit_text(f"🔍 Scanning {username}...\n🚀 Found: {len(all_urls)} items\n📄 Page: {page}")
+            except: pass
             url = f"https://www.erome.com/{username}{tab}?page={page}"
             try:
                 res = session.get(url, headers=headers, timeout=20)
@@ -155,7 +157,7 @@ async def scan_all_content(username, status_msg):
     return all_urls
 
 # ==========================================
-# CORE DELIVERY
+# CORE DELIVERY (V8.83)
 # ==========================================
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
@@ -181,20 +183,20 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 if os.path.exists(path): p_files.append(path)
                 if len(p_files) == 10 or i == len(photos):
                     if p_files:
+                        # Photos are still sent to show progress, comment these 2 lines if you want photos local only too
                         await client.send_media_group(chat_id, [InputMediaPhoto(pf, caption=f"🖼 {title}") for pf in p_files], reply_to_message_id=reply_id)
                         for pf in p_files: os.remove(pf)
                     p_files = []
             except: pass
 
 
-    # Videos (DOWNLOAD ONLY - LOGIC MODIFIED)
+    # Videos (Improved Size Handling - Downloaded but NOT sent)
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             v_name = f"{album_id}_v{v_idx}.mp4"
             filepath = os.path.join(user_folder, v_name)
             headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': url}
             try:
-                # Get size via GET stream instead of HEAD to avoid 0.0B
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
                 
@@ -215,11 +217,12 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp_fix, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     if os.path.exists(temp_fix): os.remove(filepath); os.rename(temp_fix, filepath)
                 
-                # Thumbnail generation kept to ensure file is processed, but not sent
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
-                # --- SEND VIDEO REMOVED ---
+                # --- START OF "NOT SEND" FIX ---
+                # We comment out the upload part so it just saves to the server folder
+                
                 # start_time = [time.time()]
                 # await client.send_video(
                 #    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
@@ -228,9 +231,12 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 #    progress=progress_callback, progress_args=(status, start_time, f"Uploading Video {v_idx}/{len(videos)}")
                 # )
                 
-                # --- DELETE REMOVED (So files stay in downloads folder) ---
+                # We comment out the deletion of the video file so it stays on the server
                 # if os.path.exists(filepath): os.remove(filepath)
+                
                 if os.path.exists(thumb): os.remove(thumb)
+                # --- END OF "NOT SEND" FIX ---
+                
             except: pass
 
     mark_processed(album_id)
@@ -261,7 +267,7 @@ async def user_cmd(client, message):
         if cancel_tasks.get(chat_id): break
         await process_album(client, chat_id, message.id, url, username, i, total)
         await asyncio.sleep(1)
-    await msg.delete(); await message.reply(f"🏆 Done for `{username}`! Files are saved locally.")
+    await msg.delete(); await message.reply(f"🏆 Done for `{username}`! Videos saved to storage.")
 
 @app.on_callback_query(filters.regex(r"^stop_task|"))
 async def handle_stop(client, callback: CallbackQuery):
