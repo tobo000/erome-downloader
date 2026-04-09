@@ -25,7 +25,7 @@ session = requests.Session()
 
 cancel_tasks = {}
 
-# --- 1. DATABASE (Kept logic) ---
+# --- 1. DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -50,7 +50,7 @@ def mark_processed(album_id):
     except: pass
     conn.close()
 
-# --- 2. HELPERS & ANIMATIONS (Kept Moon/Bars) ---
+# --- 2. HELPERS & ANIMATIONS ---
 
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
@@ -89,11 +89,12 @@ def get_video_meta(video_path):
         data = json.loads(res)
         duration = int(float(data.get('format', {}).get('duration', 0)))
         video_stream = next((s for s in data.get('streams', []) if s['codec_type'] == 'video'), {})
-        width, height = int(video_stream.get('width', 1280)), int(video_stream.get('height', 720))
+        width = int(video_stream.get('width', 1280))
+        height = int(video_stream.get('height', 720))
         return duration, width, height
     except: return 0, 1280, 720
 
-# --- 3. DOWNLOAD ENGINES (Kept Nitro) ---
+# --- 3. DOWNLOAD ENGINES ---
 
 def download_nitro_animated(url, path, headers, size, status_msg, loop, segs=4, action="Nitro", topic=""):
     chunk = size // segs
@@ -130,7 +131,7 @@ async def download_with_bar(url, path, headers, size, status_msg, action, topic=
                     f.write(chunk); downloaded += len(chunk)
                     await update_progress_msg(downloaded, size, status_msg, start_time, action, topic)
 
-# --- 4. SCRAPER (Kept) ---
+# --- 4. SCRAPER ---
 
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
@@ -138,8 +139,7 @@ def scrape_album_details(url):
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
-        p_l = [img.get('data-src') or img.get('src') for img in soup.select('div.img img')]
-        p_l = ['https:' + x if x.startswith('//') else x for x in p_l if x]
+        p_l = ['https:' + x.get('data-src') if x.get('data-src', '').startswith('//') else x.get('data-src') or x.get('src') for x in soup.select('div.img img')]
         v_l = []
         for v_tag in soup.find_all(['source', 'video']):
             v_src = v_tag.get('src') or v_tag.get('data-src')
@@ -153,8 +153,10 @@ def scrape_album_details(url):
 # --- 5. CORE DELIVERY ---
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
+    # FORCE HANDSHAKE
     try: await client.get_chat(chat_id)
     except: pass
+
     album_id = url.rstrip('/').split('/')[-1]
     if is_processed(album_id): return True
     
@@ -165,11 +167,9 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     os.makedirs(user_folder, exist_ok=True)
     
     status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive**\nTopic: `{title}`", reply_to_message_id=reply_id)
-    album_caption = (f"🎬 Topic: **{title}**\n"
-                     f"👤 User: `{username}`\n"
-                     f"📦 Original Quality")
+    album_caption = f"🎬 Topic: **{title}**\n👤 User: `{username}`\n📦 Original Quality"
 
-    # PHOTOS (Group of 10 with Bar)
+    # PHOTOS
     if photos:
         photo_media = []
         for i, p_url in enumerate(photos, 1):
@@ -189,7 +189,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
         for f in os.listdir(user_folder):
             if f.startswith("p_"): os.remove(os.path.join(user_folder, f))
 
-    # VIDEOS (One-by-One with Bar)
+    # VIDEOS (STABLE ONE-BY-ONE UPLOAD)
     if videos:
         loop = asyncio.get_event_loop()
         for v_idx, v_url in enumerate(videos, 1):
@@ -204,10 +204,10 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop, 4, action_v, title)
                 else:
                     await download_with_bar(v_url, filepath, headers, size, status, action_v, title)
-
+                
                 if not os.path.exists(filepath): continue
                 
-                # Fix for Phone Playback
+                # Mobile Compatibility & Streaming Fix
                 subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-movflags', 'faststart', filepath+'.tmp.mp4', '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if os.path.exists(filepath+'.tmp.mp4'): os.remove(filepath); os.rename(filepath+'.tmp.mp4', filepath)
                 
@@ -215,10 +215,12 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 thumb = filepath + ".jpg"
                 subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
-                # Handshake before Upload
+                # Final Handsake & Upload
+                await asyncio.sleep(2)
                 try: await client.get_chat(chat_id)
                 except: pass
                 
+                print(f"DEBUG: Attempting to upload {filepath} ({get_human_size(size)})")
                 start_time_up = [time.time()]
                 await client.send_video(
                     chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
@@ -227,12 +229,14 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     reply_to_message_id=reply_id, progress=pyrogram_progress, 
                     progress_args=(status, start_time_up, f"📤 Uploading Video {v_idx}/{len(videos)}", title)
                 )
+                print(f"DEBUG: Successfully uploaded {filepath}")
+
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
-            except: pass
+            except Exception as e:
+                print(f"ERROR: Failed to upload video {v_idx}. Reason: {e}")
+                await client.send_message(chat_id, f"❌ Failed to upload Video {v_idx}. Error: `{e}`")
 
-    try: os.rmdir(user_folder)
-    except: pass
     mark_processed(album_id); await status.delete()
     return True
 
@@ -298,7 +302,7 @@ async def user_cmd(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: Ready and Working!")
+        print("LOG: Stable Uploader logic ready!")
         await idle()
 
 if __name__ == "__main__":
