@@ -25,7 +25,7 @@ session = requests.Session()
 
 cancel_tasks = {}
 
-# --- 1. DATABASE (រក្សាការចងចាំ) ---
+# --- 1. DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -90,14 +90,10 @@ def get_video_meta(video_path):
         duration = int(float(data.get('format', {}).get('duration', 0)))
         video_stream = next((s for s in data.get('streams', []) if s['codec_type'] == 'video'), {})
         width, height = int(video_stream.get('width', 1280)), int(video_stream.get('height', 720))
-        rotation = 0
-        for side in video_stream.get('side_data_list', []):
-            if 'rotation' in side: rotation = abs(side['rotation'])
-        if rotation in [90, 270]: width, height = height, width
         return duration, width, height
     except: return 0, 1280, 720
 
-# --- 3. DOWNLOAD ENGINES (Nitro Engine) ---
+# --- 3. DOWNLOAD ENGINES ---
 
 def download_nitro_animated(url, path, size, status_msg, loop, action, topic, segs=4):
     chunk = size // segs
@@ -155,7 +151,7 @@ def scrape_album_details(url):
             v_src = v_tag.get('src') or v_tag.get('data-src') or v_tag.get('href')
             if v_src and (".mp4" in v_src or ".gif" in v_src): 
                 v_l.append('https:' + v_src if v_src.startswith('//') else v_src)
-        v_l.extend(re.findall(r'https?://[^\s"\'>]+.mp4', res.text))
+        v_l.extend(re.findall(r'https?://[^\s"\'>]+.(?:mp4|gif)', res.text))
         v_l = list(dict.fromkeys([v for v in v_l if "erome.com" in v]))
         v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
         return title, list(dict.fromkeys(p_l)), v_l
@@ -177,7 +173,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     
     status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive...**", reply_to_message_id=reply_id)
 
-    # UPDATED CAPTION FORMAT
     album_caption = (f"🎬 Topic: **{title}**\n"
                      f"📂 Album ទី: `{current}/{total}`\n"
                      f"📊 Total: `{len(photos)}` Photo | `{len(videos)}` Video\n"
@@ -203,44 +198,63 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
         for f in os.listdir(user_folder):
             if f.startswith("p_"): os.remove(os.path.join(user_folder, f))
 
-    # --- PART 2: VIDEOS ---
+    # --- PART 2: VIDEOS (With GIF to Video Fix) ---
     if videos:
         loop = asyncio.get_event_loop()
         for v_idx, v_url in enumerate(videos, 1):
-            filepath = os.path.join(user_folder, f"v_{v_idx}.mp4")
+            is_gif = v_url.lower().endswith(".gif")
+            # We download as .gif or .mp4 based on source
+            download_path = os.path.join(user_folder, f"v_{v_idx}" + (".gif" if is_gif else ".mp4"))
+            
             try:
                 headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
                 
                 label = f"🎬 Downloading Video {v_idx}/{len(videos)}"
+                if is_gif: label = f"🎞 Downloading GIF {v_idx}/{len(videos)}"
+                
                 if size > 10*1024*1024:
-                    await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, size, status, loop, label, title)
+                    await loop.run_in_executor(None, download_nitro_animated, v_url, download_path, size, status, loop, label, title)
                 else:
-                    await download_with_bar(v_url, filepath, size, status, label, title)
+                    await download_with_bar(v_url, download_path, size, status, label, title)
 
-                if not os.path.exists(filepath): continue
+                if not os.path.exists(download_path): continue
                 
-                # Fast Optimization for Phone/PC
-                subprocess.run(['ffmpeg', '-i', filepath, '-c:v', 'libx264', '-crf', '20', '-pix_fmt', 'yuv420p', '-vf', "scale=trunc(iw/2)*2:trunc(ih/2)*2", '-movflags', 'faststart', filepath+'.fix.mp4', '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if os.path.exists(filepath+'.fix.mp4'): os.remove(filepath); os.rename(filepath+'.fix.mp4', filepath)
+                # FINAL VIDEO PATH (Always .mp4)
+                final_v = os.path.join(user_folder, f"final_{v_idx}.mp4")
                 
-                dur, w, h = get_video_meta(filepath)
-                thumb = filepath + ".jpg"
-                subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # --- GIF TO VIDEO & MOBILE OPTIMIZATION ---
+                # Converts GIF to MP4 or fixes MP4 metadata for instant streaming
+                await status.edit_text(f"⚙️ **Processing Media...**\n`{title}`")
+                subprocess.run([
+                    'ffmpeg', '-i', download_path, 
+                    '-c:v', 'libx264', '-crf', '20', '-pix_fmt', 'yuv420p', 
+                    '-vf', "scale=trunc(iw/2)*2:trunc(ih/2)*2", 
+                    '-movflags', 'faststart', final_v, '-y'
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                if not os.path.exists(final_v): final_v = download_path # Fallback
+
+                dur, w, h = get_video_meta(final_v)
+                thumb = final_v + ".jpg"
+                subprocess.run(['ffmpeg', '-ss', '1', '-i', final_v, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
                 try: await client.get_chat(chat_id) # Handshake
                 except: pass
                 
                 start_time_up = [time.time()]
                 await client.send_video(
-                    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
+                    chat_id=chat_id, video=final_v, thumb=thumb if os.path.exists(thumb) else None,
                     width=w, height=h, duration=dur, supports_streaming=True, 
                     caption=album_caption if not photos and v_idx == 1 else "",
                     reply_to_message_id=reply_id, progress=pyrogram_progress, 
                     progress_args=(status, start_time_up, f"📤 Uploading Video {v_idx}/{len(videos)}", title)
                 )
-                if os.path.exists(filepath): os.remove(filepath)
+                
+                # Cleanup individual video files
+                if os.path.exists(download_path): os.remove(download_path)
+                if os.path.exists(final_v) and final_v != download_path: os.remove(final_v)
                 if os.path.exists(thumb): os.remove(thumb)
             except: pass
 
@@ -253,7 +267,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 async def reset_db(client, message):
     conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
     cursor.execute("DELETE FROM processed"); conn.commit(); conn.close()
-    await message.reply("Sweep swept! 🧹 **Memory Cleared!**")
+    await message.reply("🧹 **Memory Cleared!**")
 
 @app.on_message(filters.command("user", prefixes="."))
 async def user_cmd(client, message):
@@ -315,7 +329,7 @@ async def user_cmd(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: Full Optimized Bot Version Running!")
+        print("LOG: GIF Conversion Fix Version Ready!")
         await idle()
 
 if __name__ == "__main__":
