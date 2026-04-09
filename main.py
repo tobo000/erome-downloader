@@ -24,7 +24,7 @@ session = requests.Session()
 
 cancel_tasks = {}
 
-# --- 1. DATABASE (Keeping your logic to avoid duplicates) ---
+# --- 1. DATABASE ---
 def init_db():
     conn = sqlite3.connect("bot_archive.db")
     cursor = conn.cursor()
@@ -62,10 +62,10 @@ def get_human_size(num):
         num /= 1024.0
     return f"{num:.1f} TB"
 
-# ANIMATED UPLOAD PROGRESS (Rotating Moon)
-async def progress_callback(current, total, status_msg, start_time, action_text):
+# Shared Progress Update for Download & Upload
+async def update_progress_msg(current, total, status_msg, start_time, action_text):
     now = time.time()
-    if now - start_time[0] > 4:
+    if now - start_time[0] > 4: # Update every 4 seconds
         anims = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"]
         anim = anims[int(now % len(anims))]
         bar = create_progress_bar(current, total)
@@ -75,6 +75,10 @@ async def progress_callback(current, total, status_msg, start_time, action_text)
             )
             start_time[0] = now
         except: pass
+
+# Pyrogram Progress Callback for Upload
+async def pyrogram_progress(current, total, status_msg, start_time, action_text):
+    await update_progress_msg(current, total, status_msg, start_time, action_text)
 
 def get_video_meta(video_path):
     try:
@@ -90,20 +94,45 @@ def get_video_meta(video_path):
         return duration, width, height, has_audio
     except: return 0, 1280, 720, True
 
-def download_nitro(url, path, headers, size, segs=4):
+# Improved Download with Bar
+async def download_with_bar(url, path, headers, size, status_msg):
+    start_time = [time.time()]
+    downloaded = 0
+    with requests.get(url, headers=headers, stream=True, timeout=60) as r:
+        with open(path, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=1024*1024):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    await update_progress_msg(downloaded, size, status_msg, start_time, "Downloading Video")
+
+# Improved Nitro Download with Bar
+def download_nitro_animated(url, path, headers, size, status_msg, loop, segs=4):
     chunk = size // segs
+    downloaded_shared = [0]
+    start_time = [time.time()]
+
     def dl_part(s, e, n):
         pp = f"{path}.p{n}"; h = headers.copy(); h['Range'] = f'bytes={s}-{e}'
         try:
             with requests.get(url, headers=h, stream=True, timeout=60) as r:
                 with open(pp, 'wb') as f:
-                    for chk in r.iter_content(chunk_size=1024*1024): f.write(chk)
+                    for chk in r.iter_content(chunk_size=512*1024):
+                        if chk:
+                            f.write(chk)
+                            downloaded_shared[0] += len(chk)
+                            # Update bar from thread
+                            asyncio.run_coroutine_threadsafe(
+                                update_progress_msg(downloaded_shared[0], size, status_msg, start_time, "Nitro Downloading"), loop
+                            )
         except: pass
+
     with ThreadPoolExecutor(max_workers=segs) as ex:
         for i in range(segs):
             start = i * chunk
             end = (i + 1) * chunk - 1 if i < segs - 1 else size - 1
             ex.submit(dl_part, start, end, i)
+    
     with open(path, 'wb') as f:
         for i in range(segs):
             pp = f"{path}.p{i}"
@@ -111,7 +140,7 @@ def download_nitro(url, path, headers, size, segs=4):
                 with open(pp, 'rb') as pf: f.write(pf.read()); os.remove(pp)
 
 # ==========================================
-# SCRAPER ENGINE (Keeping Original Scraping)
+# SCRAPER ENGINE
 # ==========================================
 
 def scrape_album_details(url):
@@ -155,7 +184,7 @@ async def scan_all_content(username, status_msg):
     return all_urls
 
 # ==========================================
-# CORE DELIVERY (With Animations & Detailed Captions)
+# CORE DELIVERY
 # ==========================================
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
@@ -168,11 +197,8 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     user_folder = os.path.join(DOWNLOAD_DIR, username)
     if not os.path.exists(user_folder): os.makedirs(user_folder)
     
-    # Update Status with content count
-    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Album:**\n🖼 {len(photos)} Photos | 🎬 {len(videos)} Videos\n\n⌛ *Starting...*", reply_to_message_id=reply_id)
-
-    # Detailed caption for all media
-    detailed_caption = f"🎬 **{title}**\n\n📊 Total Content:\n🖼 Photos: {len(photos)}\n🎬 Videos: {len(videos)}"
+    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Found:**\n🖼 {len(photos)} Photos | 🎬 {len(videos)} Videos", reply_to_message_id=reply_id)
+    detailed_caption = f"🎬 **{title}**\n\n📊 Total Album Content:\n🖼 Photos: {len(photos)}\n🎬 Videos: {len(videos)}"
 
     # Process Photos
     if photos:
@@ -192,6 +218,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 
     # Process Videos
     if videos:
+        loop = asyncio.get_event_loop()
         for v_idx, v_url in enumerate(videos, 1):
             v_name = f"{album_id}_v{v_idx}.mp4"
             filepath = os.path.join(user_folder, v_name)
@@ -200,18 +227,11 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
                 
-                # --- DOWNLOAD ANIMATION ---
-                dl_anims = ["🛰", "🚀", "🛸", "🛰", "🚀"]
-                for anim in dl_anims:
-                    await status.edit_text(f"{anim} **Downloading Video {v_idx}/{len(videos)}**\n📦 Size: {get_human_size(size)}\n🖼 {len(photos)} Photos | 🎬 {len(videos)} Videos")
-                    await asyncio.sleep(0.3)
-
+                # --- DOWNLOAD WITH BAR ---
                 if size > 15*1024*1024:
-                    download_nitro(v_url, filepath, headers, size)
+                    await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop)
                 else:
-                    with requests.get(v_url, headers=headers, stream=True, timeout=60) as r:
-                        with open(filepath, 'wb') as f:
-                            for chunk in r.iter_content(chunk_size=1024*1024): f.write(chunk)
+                    await download_with_bar(v_url, filepath, headers, size, status)
                 
                 if not os.path.exists(filepath) or os.path.getsize(filepath) < 1000: continue
                 
@@ -224,14 +244,14 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
                 except: pass
 
-                # --- UPLOAD WITH ANIMATION ---
+                # --- UPLOAD WITH BAR ---
                 start_time = [time.time()]
                 await client.send_video(
                     chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
                     width=w, height=h, duration=dur, 
                     caption=f"{detailed_caption}\n📦 Video Size: {get_human_size(size)}",
                     supports_streaming=True, reply_to_message_id=reply_id,
-                    progress=progress_callback, progress_args=(status, start_time, f"Uploading Video {v_idx}/{len(videos)}")
+                    progress=pyrogram_progress, progress_args=(status, start_time, f"Uploading Video {v_idx}/{len(videos)}")
                 )
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
@@ -254,23 +274,23 @@ async def user_cmd(client, message):
     all_urls = await scan_all_content(username, msg)
     if not all_urls: return await msg.edit_text(f"❌ No content for `{username}`.")
     total = len(all_urls)
-    await msg.edit_text(f"✅ Found: `{total}` Albums.\n🚀 *Starting Delivery...*", 
+    await msg.edit_text(f"✅ Found: `{total}` Albums.\n🚀 *Starting...*", 
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{chat_id}")]]))
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
         await process_album(client, chat_id, message.id, url, username, i, total)
         await asyncio.sleep(1)
-    await msg.delete(); await message.reply(f"🏆 Successfully finished `{username}`!")
+    await msg.delete(); await message.reply(f"🏆 Completed `{username}`!")
 
 @app.on_callback_query(filters.regex(r"^stop_task|"))
 async def handle_stop(client, callback: CallbackQuery):
     cancel_tasks[int(callback.data.split("|")[1])] = True
-    await callback.answer("🛑 Task Stopping...", show_alert=True)
+    await callback.answer("🛑 Stopping...", show_alert=True)
 
 async def main():
     init_db()
     async with app:
-        print("LOG: Perfect Version Running with Animations & Detailed Captions!")
+        print("LOG: Animated Bars for Download & Upload Ready!")
         await idle()
 
 if __name__ == "__main__":
