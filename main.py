@@ -24,7 +24,7 @@ session = requests.Session()
 
 cancel_tasks = {}
 
-# --- 1. DATABASE ---
+# --- 1. DATABASE (Keeping your logic to avoid duplicates) ---
 def init_db():
     conn = sqlite3.connect("bot_archive.db")
     cursor = conn.cursor()
@@ -62,11 +62,10 @@ def get_human_size(num):
         num /= 1024.0
     return f"{num:.1f} TB"
 
-# ANIMATED UPLOAD PROGRESS
+# ANIMATED UPLOAD PROGRESS (Rotating Moon)
 async def progress_callback(current, total, status_msg, start_time, action_text):
     now = time.time()
     if now - start_time[0] > 4:
-        # Rotating moon animation for uploading
         anims = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"]
         anim = anims[int(now % len(anims))]
         bar = create_progress_bar(current, total)
@@ -112,7 +111,7 @@ def download_nitro(url, path, headers, size, segs=4):
                 with open(pp, 'rb') as pf: f.write(pf.read()); os.remove(pp)
 
 # ==========================================
-# SCRAPER ENGINE
+# SCRAPER ENGINE (Keeping Original Scraping)
 # ==========================================
 
 def scrape_album_details(url):
@@ -156,7 +155,7 @@ async def scan_all_content(username, status_msg):
     return all_urls
 
 # ==========================================
-# CORE DELIVERY
+# CORE DELIVERY (With Animations & Detailed Captions)
 # ==========================================
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
@@ -169,10 +168,11 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     user_folder = os.path.join(DOWNLOAD_DIR, username)
     if not os.path.exists(user_folder): os.makedirs(user_folder)
     
-    # CONTENT PREVIEW
-    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Found:**\n🖼 {len(photos)} Photos\n🎬 {len(videos)} Videos\n\n⌛ *Starting Download...*", reply_to_message_id=reply_id)
+    # Update Status with content count
+    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Album:**\n🖼 {len(photos)} Photos | 🎬 {len(videos)} Videos\n\n⌛ *Starting...*", reply_to_message_id=reply_id)
 
-    album_caption = f"🎬 **{title}**\n\n📊 Total Album Content:\n🖼 Photos: {len(photos)}\n🎬 Videos: {len(videos)}"
+    # Detailed caption for all media
+    detailed_caption = f"🎬 **{title}**\n\n📊 Total Content:\n🖼 Photos: {len(photos)}\n🎬 Videos: {len(videos)}"
 
     # Process Photos
     if photos:
@@ -185,7 +185,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 if os.path.exists(path): p_files.append(path)
                 if len(p_files) == 10 or i == len(photos):
                     if p_files:
-                        await client.send_media_group(chat_id, [InputMediaPhoto(pf, caption=album_caption) for pf in p_files], reply_to_message_id=reply_id)
+                        await client.send_media_group(chat_id, [InputMediaPhoto(pf, caption=detailed_caption) for pf in p_files], reply_to_message_id=reply_id)
                         for pf in p_files: os.remove(pf)
                     p_files = []
             except: pass
@@ -215,7 +215,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 
                 if not os.path.exists(filepath) or os.path.getsize(filepath) < 1000: continue
                 
-                # Metadata & FFmpeg Fix
                 dur, w, h, has_audio = get_video_meta(filepath)
                 thumb = filepath + ".jpg"
                 try:
@@ -225,12 +224,12 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
                 except: pass
 
-                # --- UPLOAD ANIMATION ---
+                # --- UPLOAD WITH ANIMATION ---
                 start_time = [time.time()]
                 await client.send_video(
                     chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
                     width=w, height=h, duration=dur, 
-                    caption=f"{album_caption}\n📦 Video Size: {get_human_size(size)}",
+                    caption=f"{detailed_caption}\n📦 Video Size: {get_human_size(size)}",
                     supports_streaming=True, reply_to_message_id=reply_id,
                     progress=progress_callback, progress_args=(status, start_time, f"Uploading Video {v_idx}/{len(videos)}")
                 )
@@ -255,23 +254,23 @@ async def user_cmd(client, message):
     all_urls = await scan_all_content(username, msg)
     if not all_urls: return await msg.edit_text(f"❌ No content for `{username}`.")
     total = len(all_urls)
-    await msg.edit_text(f"✅ Found: `{total}` Albums.\n🚀 *Preparing to deliver...*", 
+    await msg.edit_text(f"✅ Found: `{total}` Albums.\n🚀 *Starting Delivery...*", 
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{chat_id}")]]))
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
         await process_album(client, chat_id, message.id, url, username, i, total)
         await asyncio.sleep(1)
-    await msg.delete(); await message.reply(f"🏆 Completed `{username}`!")
+    await msg.delete(); await message.reply(f"🏆 Successfully finished `{username}`!")
 
 @app.on_callback_query(filters.regex(r"^stop_task|"))
 async def handle_stop(client, callback: CallbackQuery):
     cancel_tasks[int(callback.data.split("|")[1])] = True
-    await callback.answer("🛑 Stopping...", show_alert=True)
+    await callback.answer("🛑 Task Stopping...", show_alert=True)
 
 async def main():
     init_db()
     async with app:
-        print("LOG: Animated & Detailed Version Started!")
+        print("LOG: Perfect Version Running with Animations & Detailed Captions!")
         await idle()
 
 if __name__ == "__main__":
