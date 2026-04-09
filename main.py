@@ -49,8 +49,7 @@ def mark_processed(album_id):
     except: pass
     conn.close()
 
-# --- 2. HELPERS & ANIMATIONS ---
-
+# --- 2. HELPERS ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, (current / total) * 100)
@@ -62,23 +61,19 @@ def get_human_size(num):
         num /= 1024.0
     return f"{num:.1f} TB"
 
-# ANIMATED PROGRESS FOR UPLOADING
 async def progress_callback(current, total, status_msg, start_time, action_text):
     now = time.time()
-    if now - start_time[0] > 4:
+    if now - start_time[0] > 5:
         anims = ["🌕", "🌖", "🌗", "🌘", "🌑", "🌒", "🌓", "🌔"]
         anim = anims[int(now % len(anims))]
         bar = create_progress_bar(current, total)
         try:
-            await status_msg.edit_text(
-                f"{anim} **{action_text}**\n\n{bar}\n📦 **Size:** {get_human_size(current)} / {get_human_size(total)}"
-            )
+            await status_msg.edit_text(f"{anim} **{action_text}**\n\n{bar}\n📦 {get_human_size(current)} / {get_human_size(total)}")
             start_time[0] = now
         except: pass
 
 def get_video_meta(video_path):
-    if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
-        return 0, 1280, 720, False
+    # Fails gracefully if FFmpeg is missing
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', video_path]
         res = subprocess.check_output(cmd).decode('utf-8')
@@ -90,7 +85,7 @@ def get_video_meta(video_path):
         height = int(v.get('height', 720))
         has_audio = any(s['codec_type'] == 'audio' for s in streams)
         return duration, width, height, has_audio
-    except: return 0, 1280, 720, False
+    except: return 0, 1280, 720, True
 
 def download_nitro(url, path, headers, size, segs=4):
     chunk = size // segs
@@ -111,10 +106,6 @@ def download_nitro(url, path, headers, size, segs=4):
             pp = f"{path}.p{i}"
             if os.path.exists(pp):
                 with open(pp, 'rb') as pf: f.write(pf.read()); os.remove(pp)
-
-# ==========================================
-# SCRAPER ENGINE
-# ==========================================
 
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
@@ -147,33 +138,24 @@ async def scan_all_content(username, status_msg):
                 html = res.text
                 album_ids = re.findall(r'/a/([a-zA-Z0-9]+)', html)
                 if not album_ids: break
-                new = 0
                 for aid in album_ids:
                     f_url = f"https://www.erome.com/a/{aid}"
-                    if f_url not in all_urls: all_urls.append(f_url); new += 1
-                if new == 0 or "Next" not in html: break
+                    if f_url not in all_urls: all_urls.append(f_url)
+                if "Next" not in html: break
                 page += 1
                 await asyncio.sleep(0.5)
             except: break
     return all_urls
 
-# ==========================================
-# CORE DELIVERY
-# ==========================================
-
 async def process_album(client, chat_id, reply_id, url, username, current, total):
     album_id = url.rstrip('/').split('/')[-1]
     if is_processed(album_id): return True
-
     title, photos, videos = scrape_album_details(url)
     if not photos and not videos: return False
-
     user_folder = os.path.join(DOWNLOAD_DIR, username)
     if not os.path.exists(user_folder): os.makedirs(user_folder)
-
     status = await client.send_message(chat_id, f"📡 **[{current}/{total}]** Preparing: `{title}`", reply_to_message_id=reply_id)
 
-    # Photos
     if photos:
         p_files = []
         for i, p_url in enumerate(photos, 1):
@@ -189,7 +171,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     p_files = []
             except: pass
 
-    # Videos
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             v_name = f"{album_id}_v{v_idx}.mp4"
@@ -198,33 +179,27 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             try:
                 with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
                     size = int(r.headers.get('content-length', 0))
-                
-                # --- DOWNLOAD ANIMATION ---
                 await status.edit_text(f"📥 **Downloading Video {v_idx}/{len(videos)}**\n📦 Size: {get_human_size(size)}")
-                
                 if size > 15*1024*1024:
                     download_nitro(v_url, filepath, headers, size)
                 else:
                     with requests.get(v_url, headers=headers, stream=True, timeout=60) as r:
                         with open(filepath, 'wb') as f:
                             for chunk in r.iter_content(chunk_size=1024*1024): f.write(chunk)
-                
                 if not os.path.exists(filepath) or os.path.getsize(filepath) < 1000: continue
-
-                # Metadata Check
+                
                 dur, w, h, has_audio = get_video_meta(filepath)
-                
-                # Audio Fix (Requires FFmpeg)
-                if not has_audio:
-                    temp_fix = filepath + ".fix.mp4"
-                    subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp_fix, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    if os.path.exists(temp_fix): os.remove(filepath); os.rename(temp_fix, filepath)
-                
-                # Thumb Fix (Requires FFmpeg)
                 thumb = filepath + ".jpg"
-                subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
-                # --- UPLOAD WITH ANIMATION ---
+                # These lines will only work if FFmpeg is installed
+                try:
+                    if not has_audio:
+                        temp_fix = filepath + ".fix.mp4"
+                        subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', temp_fix, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+                        if os.path.exists(temp_fix): os.remove(filepath); os.rename(temp_fix, filepath)
+                    subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+                except: pass
+
                 start_time = [time.time()]
                 await client.send_video(
                     chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
@@ -232,24 +207,17 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     supports_streaming=True, reply_to_message_id=reply_id,
                     progress=progress_callback, progress_args=(status, start_time, f"Uploading Video {v_idx}/{len(videos)}")
                 )
-                
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
-            except Exception as e:
-                print(f"Error Processing Video: {e}")
-
+            except Exception as e: print(f"Error: {e}")
     mark_processed(album_id)
     await status.delete()
     return True
 
-# ==========================================
-# COMMAND HANDLERS
-# ==========================================
-
 @app.on_message(filters.command("user", prefixes="."))
 async def user_cmd(client, message):
     if len(message.command) < 2: return
-    try: await client.get_chat(message.chat.id) # Peer ID Fix
+    try: await client.get_chat(message.chat.id)
     except: pass
     input_data = message.command[1].strip()
     username = input_data.split("erome.com/")[-1].split('/')[0].split('?')[0] if "erome.com/" in input_data else input_data
@@ -259,7 +227,7 @@ async def user_cmd(client, message):
     all_urls = await scan_all_content(username, msg)
     if not all_urls: return await msg.edit_text(f"❌ No content for `{username}`.")
     total = len(all_urls)
-    await msg.edit_text(f"✅ Found: `{total}` items. Starting...", 
+    await msg.edit_text(f"✅ Found: `{total}` items.", 
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{chat_id}")]]))
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
@@ -273,16 +241,9 @@ async def handle_stop(client, callback: CallbackQuery):
     await callback.answer("🛑 Stopping...", show_alert=True)
 
 async def main():
-    # Final check for FFmpeg before starting
-    try:
-        subprocess.run(['ffmpeg', '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except FileNotFoundError:
-        print("CRITICAL ERROR: FFmpeg is not installed on this server! Install it using 'sudo apt install ffmpeg'.")
-        return
-
     init_db()
     async with app:
-        print("LOG: Bot is running!")
+        print("LOG: Bot is running! (FFmpeg check skipped for compatibility)")
         await idle()
 
 if __name__ == "__main__":
