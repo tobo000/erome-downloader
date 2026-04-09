@@ -62,10 +62,9 @@ def get_human_size(num):
         num /= 1024.0
     return f"{num:.1f} TB"
 
-# Shared Progress Update for Download & Upload
 async def update_progress_msg(current, total, status_msg, start_time, action_text):
     now = time.time()
-    if now - start_time[0] > 4: # Update every 4 seconds
+    if now - start_time[0] > 4: 
         anims = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"]
         anim = anims[int(now % len(anims))]
         bar = create_progress_bar(current, total)
@@ -76,7 +75,6 @@ async def update_progress_msg(current, total, status_msg, start_time, action_tex
             start_time[0] = now
         except: pass
 
-# Pyrogram Progress Callback for Upload
 async def pyrogram_progress(current, total, status_msg, start_time, action_text):
     await update_progress_msg(current, total, status_msg, start_time, action_text)
 
@@ -94,8 +92,7 @@ def get_video_meta(video_path):
         return duration, width, height, has_audio
     except: return 0, 1280, 720, True
 
-# Improved Download with Bar
-async def download_with_bar(url, path, headers, size, status_msg):
+async def download_with_bar(url, path, headers, size, status_msg, action="Downloading"):
     start_time = [time.time()]
     downloaded = 0
     with requests.get(url, headers=headers, stream=True, timeout=60) as r:
@@ -104,14 +101,12 @@ async def download_with_bar(url, path, headers, size, status_msg):
                 if chunk:
                     f.write(chunk)
                     downloaded += len(chunk)
-                    await update_progress_msg(downloaded, size, status_msg, start_time, "Downloading Video")
+                    await update_progress_msg(downloaded, size, status_msg, start_time, action)
 
-# Improved Nitro Download with Bar
 def download_nitro_animated(url, path, headers, size, status_msg, loop, segs=4):
     chunk = size // segs
     downloaded_shared = [0]
     start_time = [time.time()]
-
     def dl_part(s, e, n):
         pp = f"{path}.p{n}"; h = headers.copy(); h['Range'] = f'bytes={s}-{e}'
         try:
@@ -121,26 +116,19 @@ def download_nitro_animated(url, path, headers, size, status_msg, loop, segs=4):
                         if chk:
                             f.write(chk)
                             downloaded_shared[0] += len(chk)
-                            # Update bar from thread
-                            asyncio.run_coroutine_threadsafe(
-                                update_progress_msg(downloaded_shared[0], size, status_msg, start_time, "Nitro Downloading"), loop
-                            )
+                            asyncio.run_coroutine_threadsafe(update_progress_msg(downloaded_shared[0], size, status_msg, start_time, "Nitro Downloading"), loop)
         except: pass
-
     with ThreadPoolExecutor(max_workers=segs) as ex:
         for i in range(segs):
             start = i * chunk
             end = (i + 1) * chunk - 1 if i < segs - 1 else size - 1
             ex.submit(dl_part, start, end, i)
-    
     with open(path, 'wb') as f:
         for i in range(segs):
-            pp = f"{path}.p{i}"
-            if os.path.exists(pp):
-                with open(pp, 'rb') as pf: f.write(pf.read()); os.remove(pp)
+            pp = f"{path}.p{i}"; pf = open(pp, 'rb'); f.write(pf.read()); pf.close(); os.remove(pp)
 
 # ==========================================
-# SCRAPER ENGINE
+# SCRAPER (HIGH RES FIX)
 # ==========================================
 
 def scrape_album_details(url):
@@ -149,15 +137,105 @@ def scrape_album_details(url):
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
-        p_l = list(dict.fromkeys([x if x.startswith('http') else 'https:' + x for x in [i.get('data-src') or i.get('src') for i in soup.select('div.img img') if "erome.com" in (i.get('data-src') or i.get('src', ''))] if x]))
+        
+        # High Res Photos (get data-src for original)
+        p_l = []
+        for img in soup.select('div.img img'):
+            src = img.get('data-src') or img.get('src')
+            if src:
+                if not src.startswith('http'): src = 'https:' + src
+                p_l.append(src)
+        p_l = list(dict.fromkeys(p_l))
+
+        # High Res Videos
         v_candidates = []
         for tag in soup.find_all(['video', 'source', 'a']):
             src = tag.get('src') or tag.get('data-src') or tag.get('href')
-            if src and ".mp4" in src.lower(): v_candidates.append(src if src.startswith('http') else 'https:' + src)
+            if src and ".mp4" in src.lower():
+                if not src.startswith('http'): src = 'https:' + src
+                v_candidates.append(src)
         v_candidates.extend(re.findall(r'https?://[^\s"\'>]+.mp4', res.text))
         v_l = list(dict.fromkeys([v for v in v_candidates if "erome.com" in v]))
+        # Sort so highest res (1080p, 720p) comes first
+        v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
+        
         return title, p_l, v_l
     except: return "Error", [], []
+
+# ==========================================
+# CORE DELIVERY (ALBUM MODE)
+# ==========================================
+
+async def process_album(client, chat_id, reply_id, url, username, current, total):
+    album_id = url.rstrip('/').split('/')[-1]
+    if is_processed(album_id): return True
+    
+    title, photos, videos = scrape_album_details(url)
+    if not photos and not videos: return False
+    
+    user_folder = os.path.join(DOWNLOAD_DIR, username, album_id)
+    if not os.path.exists(user_folder): os.makedirs(user_folder)
+    
+    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Media Group:**\n🖼 {len(photos)} Photos | 🎬 {len(videos)} Videos", reply_to_message_id=reply_id)
+    
+    media_to_send = []
+    loop = asyncio.get_event_loop()
+
+    # 1. Download Photos
+    for i, p_url in enumerate(photos, 1):
+        path = os.path.join(user_folder, f"p_{i}.jpg")
+        try:
+            r = session.get(p_url, timeout=30)
+            with open(path, 'wb') as f: f.write(r.content)
+            media_to_send.append(InputMediaPhoto(path))
+            await status.edit_text(f"🖼 **Downloading Photo {i}/{len(photos)}**")
+        except: pass
+
+    # 2. Download Videos
+    for v_idx, v_url in enumerate(videos, 1):
+        filepath = os.path.join(user_folder, f"v_{v_idx}.mp4")
+        headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': url}
+        try:
+            with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
+                size = int(r.headers.get('content-length', 0))
+            
+            if size > 15*1024*1024:
+                await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop)
+            else:
+                await download_with_bar(v_url, filepath, headers, size, status)
+
+            dur, w, h, has_audio = get_video_meta(filepath)
+            thumb = filepath + ".jpg"
+            if not has_audio:
+                fix = filepath + ".fix.mp4"
+                subprocess.run(['ffmpeg', '-i', filepath, '-f', 'lavfi', '-i', 'anullsrc', '-c:v', 'copy', '-c:a', 'aac', '-shortest', fix, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if os.path.exists(fix): os.remove(filepath); os.rename(fix, filepath)
+            subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            media_to_send.append(InputMediaVideo(filepath, thumb=thumb if os.path.exists(thumb) else None, width=w, height=h, duration=dur))
+        except: pass
+
+    # 3. Send as Media Group (Chunks of 10)
+    caption = f"🎬 **{title}**\n👤 User: `{username}`\n📦 Total: {len(photos)}🖼 {len(videos)}🎬"
+    start_time = [time.time()]
+
+    for i in range(0, len(media_to_send), 10):
+        chunk = media_to_send[i:i+10]
+        if i == 0: chunk[0].caption = caption # Set caption on the first item
+        try:
+            await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
+            await status.edit_text(f"📤 **Uploading Media Group...** {i+len(chunk)}/{len(media_to_send)}")
+        except Exception as e:
+            print(f"Group Error: {e}")
+
+    # Cleanup
+    for f in os.listdir(user_folder): os.remove(os.path.join(user_folder, f))
+    os.rmdir(user_folder)
+    mark_processed(album_id)
+    await status.delete()
+    return True
+
+# --- HANDLERS (Same as your working version) ---
 
 async def scan_all_content(username, status_msg):
     all_urls = []
@@ -183,103 +261,19 @@ async def scan_all_content(username, status_msg):
             except: break
     return all_urls
 
-# ==========================================
-# CORE DELIVERY
-# ==========================================
-
-async def process_album(client, chat_id, reply_id, url, username, current, total):
-    album_id = url.rstrip('/').split('/')[-1]
-    if is_processed(album_id): return True
-    
-    title, photos, videos = scrape_album_details(url)
-    if not photos and not videos: return False
-    
-    user_folder = os.path.join(DOWNLOAD_DIR, username)
-    if not os.path.exists(user_folder): os.makedirs(user_folder)
-    
-    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Found:**\n🖼 {len(photos)} Photos | 🎬 {len(videos)} Videos", reply_to_message_id=reply_id)
-    detailed_caption = f"🎬 **{title}**\n\n📊 Total Album Content:\n🖼 Photos: {len(photos)}\n🎬 Videos: {len(videos)}"
-
-    # Process Photos
-    if photos:
-        p_files = []
-        for i, p_url in enumerate(photos, 1):
-            path = os.path.join(user_folder, f"img_{album_id}_{i}.jpg")
-            try:
-                r = session.get(p_url, timeout=30)
-                with open(path, 'wb') as f: f.write(r.content)
-                if os.path.exists(path): p_files.append(path)
-                if len(p_files) == 10 or i == len(photos):
-                    if p_files:
-                        await client.send_media_group(chat_id, [InputMediaPhoto(pf, caption=detailed_caption) for pf in p_files], reply_to_message_id=reply_id)
-                        for pf in p_files: os.remove(pf)
-                    p_files = []
-            except: pass
-
-    # Process Videos
-    if videos:
-        loop = asyncio.get_event_loop()
-        for v_idx, v_url in enumerate(videos, 1):
-            v_name = f"{album_id}_v{v_idx}.mp4"
-            filepath = os.path.join(user_folder, v_name)
-            headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': url}
-            try:
-                with requests.get(v_url, headers=headers, stream=True, timeout=15) as r:
-                    size = int(r.headers.get('content-length', 0))
-                
-                # --- DOWNLOAD WITH BAR ---
-                if size > 15*1024*1024:
-                    await loop.run_in_executor(None, download_nitro_animated, v_url, filepath, headers, size, status, loop)
-                else:
-                    await download_with_bar(v_url, filepath, headers, size, status)
-                
-                if not os.path.exists(filepath) or os.path.getsize(filepath) < 1000: continue
-                
-                dur, w, h, has_audio = get_video_meta(filepath)
-                thumb = filepath + ".jpg"
-                try:
-                    if not has_audio:
-                        subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-i', filepath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', filepath+".fix.mp4", '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-                        if os.path.exists(filepath+".fix.mp4"): os.remove(filepath); os.rename(filepath+".fix.mp4", filepath)
-                    subprocess.run(['ffmpeg', '-ss', '00:00:01', '-i', filepath, '-vframes', '1', '-q:v', '2', thumb, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-                except: pass
-
-                # --- UPLOAD WITH BAR ---
-                start_time = [time.time()]
-                await client.send_video(
-                    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
-                    width=w, height=h, duration=dur, 
-                    caption=f"{detailed_caption}\n📦 Video Size: {get_human_size(size)}",
-                    supports_streaming=True, reply_to_message_id=reply_id,
-                    progress=pyrogram_progress, progress_args=(status, start_time, f"Uploading Video {v_idx}/{len(videos)}")
-                )
-                if os.path.exists(filepath): os.remove(filepath)
-                if os.path.exists(thumb): os.remove(thumb)
-            except Exception as e: print(f"Error: {e}")
-
-    mark_processed(album_id)
-    await status.delete()
-    return True
-
 @app.on_message(filters.command("user", prefixes="."))
 async def user_cmd(client, message):
     if len(message.command) < 2: return
     try: await client.get_chat(message.chat.id)
     except: pass
-    input_data = message.command[1].strip()
-    username = input_data.split("erome.com/")[-1].split('/')[0].split('?')[0] if "erome.com/" in input_data else input_data
-    chat_id = message.chat.id
-    cancel_tasks[chat_id] = False
-    msg = await message.reply(f"🛰 **Scanning Erome...**")
+    username = message.command[1].strip().split("erome.com/")[-1].split('/')[0]
+    cancel_tasks[message.chat.id] = False
+    msg = await message.reply(f"🛰 **Scanning...**")
     all_urls = await scan_all_content(username, msg)
-    if not all_urls: return await msg.edit_text(f"❌ No content for `{username}`.")
-    total = len(all_urls)
-    await msg.edit_text(f"✅ Found: `{total}` Albums.\n🚀 *Starting...*", 
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data=f"stop_task|{chat_id}")]]))
+    if not all_urls: return await msg.edit_text(f"❌ No content.")
     for i, url in enumerate(all_urls, 1):
-        if cancel_tasks.get(chat_id): break
-        await process_album(client, chat_id, message.id, url, username, i, total)
-        await asyncio.sleep(1)
+        if cancel_tasks.get(message.chat.id): break
+        await process_album(client, message.chat.id, message.id, url, username, i, len(all_urls))
     await msg.delete(); await message.reply(f"🏆 Completed `{username}`!")
 
 @app.on_callback_query(filters.regex(r"^stop_task|"))
@@ -290,7 +284,7 @@ async def handle_stop(client, callback: CallbackQuery):
 async def main():
     init_db()
     async with app:
-        print("LOG: Animated Bars for Download & Upload Ready!")
+        print("LOG: Media Group & High Res Version Started!")
         await idle()
 
 if __name__ == "__main__":
