@@ -25,7 +25,7 @@ session = requests.Session()
 
 cancel_tasks = {}
 
-# --- 1. DATABASE ---
+# --- 1. DATABASE ( memory ) ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -117,10 +117,7 @@ def download_nitro_animated(url, path, size, status_msg, loop, action, topic, se
             ex.submit(dl_part, start, end, i)
     with open(path, 'wb') as f:
         for i in range(segs):
-            pp = f"{path}.p{i}"
-            if os.path.exists(pp):
-                with open(pp, 'rb') as pf: f.write(pf.read())
-                os.remove(pp)
+            pp = f"{path}.p{i}"; pf = open(pp, 'rb'); f.write(pf.read()); pf.close(); os.remove(pp)
 
 async def download_with_bar(url, path, size, status_msg, action, topic):
     start_time = [time.time()]
@@ -141,13 +138,14 @@ def scrape_album_details(url):
         res = session.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(res.text, 'html.parser')
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
-        p_l = ['https:' + x.get('data-src') if x.get('data-src', '').startswith('//') else x.get('data-src') or x.get('src') for x in soup.select('div.img img')]
+        p_l = [img.get('data-src') or img.get('src') for img in soup.select('div.img img')]
+        p_l = ['https:' + x if x.startswith('//') else x for x in p_l if x]
         v_l = []
         for v_tag in soup.find_all(['source', 'video', 'a']):
             v_src = v_tag.get('src') or v_tag.get('data-src') or v_tag.get('href')
             if v_src and (".mp4" in v_src or ".gif" in v_src): 
                 v_l.append('https:' + v_src if v_src.startswith('//') else v_src)
-        v_l.extend(re.findall(r'https?://[^\s"\'>]+.(?:mp4|gif)', res.text))
+        v_l.extend(re.findall(r'https?://[^\s"\'>]+.mp4', res.text))
         v_l = list(dict.fromkeys([v for v in v_l if "erome.com" in v]))
         v_l.sort(key=lambda x: (re.search(r'(1080|720|high)', x.lower()) is None, x))
         return title, list(dict.fromkeys(p_l)), v_l
@@ -170,7 +168,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 
     album_caption = (f"🎬 Topic: **{title}**\n"
                      f"📂 Album: `{current}/{total}`\n"
-                     f"📊 Total: `{len(photos)}` Photo | `{len(videos)}` Video\n"
+                     f"📊 Total: `{len(photos)}` 🖼 | `{len(videos)}` 🎬\n"
                      f"👤 User: `{username.upper()}`\n"
                      f"📦 Original Quality")
 
@@ -247,6 +245,7 @@ async def user_cmd(client, message):
     try: await client.get_chat(chat_id)
     except: pass
     raw_input = message.command[1].strip()
+    
     if "/a/" in raw_input:
         msg = await message.reply("🛰 **Link Detected...**")
         await process_album(client, chat_id, message.id, raw_input, "direct", 1, 1)
@@ -255,34 +254,37 @@ async def user_cmd(client, message):
     query = raw_input.split("erome.com/")[-1].split('/')[0]
     cancel_tasks[chat_id] = False
     msg = await message.reply(f"🛰 **Scanning for `{query}`...**")
-    all_urls, total_p, total_v = [], 0, 0
-    headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0'}
-    for base_url in [f"https://www.erome.com/{query}", f"https://www.erome.com/search?v={query}"]:
+    
+    all_urls = []
+    headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
+    
+    # NEW SCANNER: Uses Regex to find /a/ links in Profile and Search
+    scan_targets = [f"https://www.erome.com/{query}", f"https://www.erome.com/search?v={query}"]
+    
+    for base_url in scan_targets:
         page = 1
-        while page <= 5:
+        while page <= 10:
             try:
                 res = session.get(f"{base_url}?page={page}" if "?" in base_url else f"{base_url}?page={page}", headers=headers, timeout=15)
                 if res.status_code != 200: break
-                soup = BeautifulSoup(res.text, 'html.parser')
-                albums = soup.select('div.album-info')
-                if not albums: break
-                for album in albums:
-                    a_tag = album.find_parent('a')
-                    if a_tag:
-                        f_url = a_tag.get('href')
-                        if f_url and f_url not in all_urls:
-                            all_urls.append(f_url)
-                            cnt = album.get_text()
-                            p_c = re.search(r'(\d+)\s*photo', cnt.lower())
-                            v_c = re.search(r'(\d+)\s*video', cnt.lower())
-                            if p_c: total_p += int(p_c.group(1))
-                            if v_c: total_v += int(v_c.group(1))
-                if "Next" not in res.text: break
-                page += 1; await msg.edit_text(f"🔍 **Scanning {query}...**\n📂 **Albums:** `{len(all_urls)}`\n🖼 **Photos:** `{total_p}`\n🎬 **Videos:** `{total_v}`")
+                # Aggressive regex to find all album IDs
+                ids = re.findall(r'/a/([a-zA-Z0-9]{8})', res.text)
+                if not ids: break
+                
+                new_found = 0
+                for aid in ids:
+                    f_url = f"https://www.erome.com/a/{aid}"
+                    if f_url not in all_urls:
+                        all_urls.append(f_url)
+                        new_found += 1
+                
+                if new_found == 0 or "Next" not in res.text: break
+                page += 1
+                await msg.edit_text(f"🔍 Found {len(all_urls)} items for `{query}`...")
             except: break
-        if all_urls: break
+        if all_urls: break # If we found profile, don't need search
 
-    if not all_urls: return await msg.edit_text(f"❌ No content.")
+    if not all_urls: return await msg.edit_text(f"❌ No content for `{query}`.")
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
         await process_album(client, chat_id, message.id, url, query, i, len(all_urls))
@@ -291,7 +293,7 @@ async def user_cmd(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: Perfect Version Running!")
+        print("LOG: Advanced Scanner Fixed!")
         await idle()
 
 if __name__ == "__main__":
