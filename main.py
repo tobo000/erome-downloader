@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
-ADMIN_ID = 123456789 # <--- ប្តូរដាក់ Telegram ID របស់អ្នក
+ADMIN_ID = 5549600755,7010218617 # <--- ប្តូរដាក់ Telegram ID របស់អ្នក
 
 app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH, sleep_threshold=120)
 DOWNLOAD_DIR = "downloads"
@@ -162,7 +162,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive...**", reply_to_message_id=reply_id)
 
     album_caption = (f"🎬 Topic: **{title}**\n"
-                     f"📂 Album ទី: `{current}/{total}`\n"
+                     f"📂 Album: `{current}/{total}`\n"
                      f"📊 Total: `{len(all_photos)}` 🖼 | `{len(all_videos)}` 🎬\n"
                      f"👤 User: `{username.upper()}`\n"
                      f"📦 Original Quality")
