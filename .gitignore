@@ -3,3 +3,4 @@ downloads/
 *.session-journal
 .env
 __pycache__/
+bot_archive.db
