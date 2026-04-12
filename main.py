@@ -18,19 +18,22 @@ load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 
-app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH, sleep_threshold=60)
+app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH, sleep_threshold=120)
 DOWNLOAD_DIR = "downloads"
 DB_NAME = "bot_archive.db"
 if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 
 session = requests.Session()
-executor = ThreadPoolExecutor(max_workers=8) # As per original
+executor = ThreadPoolExecutor(max_workers=8) 
 cancel_tasks = {}
 
-# --- 2. DATABASE ---
+# --- 2. DATABASE (Upgraded for Resume Support) ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
+    # Table សម្រាប់អាល់ប៊ុមដែលចប់ ១០០%
     conn.execute("CREATE TABLE IF NOT EXISTS processed (album_id TEXT PRIMARY KEY)")
+    # Table សម្រាប់កត់ត្រារូបភាព/វីដេអូនីមួយៗដែលផ្ញើរួច (ដើម្បី Resume)
+    conn.execute("CREATE TABLE IF NOT EXISTS processed_media (media_id TEXT PRIMARY KEY, album_id TEXT)")
     conn.commit(); conn.close()
 
 def is_processed(album_id):
@@ -38,10 +41,25 @@ def is_processed(album_id):
     res = conn.execute("SELECT 1 FROM processed WHERE album_id = ?", (album_id,)).fetchone()
     conn.close(); return res is not None
 
+def is_media_processed(media_url):
+    # បង្កើត ID ពី URL ដើម្បីចំណាំ
+    media_id = re.sub(r'\W+', '', media_url)
+    conn = sqlite3.connect(DB_NAME)
+    res = conn.execute("SELECT 1 FROM processed_media WHERE media_id = ?", (media_id,)).fetchone()
+    conn.close(); return res is not None
+
+def mark_media_processed(media_url, album_id):
+    media_id = re.sub(r'\W+', '', media_url)
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        conn.execute("INSERT OR IGNORE INTO processed_media (media_id, album_id) VALUES (?, ?)", (media_id, album_id))
+        conn.commit(); conn.close()
+    except: pass
+
 def mark_processed(album_id):
     try:
         conn = sqlite3.connect(DB_NAME)
-        conn.execute("INSERT INTO processed (album_id) VALUES (?)", (album_id,))
+        conn.execute("INSERT OR IGNORE INTO processed (album_id) VALUES (?)", (album_id,))
         conn.commit(); conn.close()
     except: pass
 
@@ -87,7 +105,7 @@ def get_video_meta(video_path):
         return duration, int(video_stream.get('width', 1280)), int(video_stream.get('height', 720))
     except: return 0, 1280, 720
 
-# --- 4. NITRO DOWNLOADER (Original Logic) ---
+# --- 4. NITRO DOWNLOAD ENGINE (Original Logic) ---
 def download_nitro_animated(url, path, size, status_msg, loop, action, topic, segs=4):
     chunk = size // segs
     downloaded_shared = [0]
@@ -126,7 +144,6 @@ def scrape_album_details(url):
             v_src = v_tag.get('src') or v_tag.get('data-src') or v_tag.get('href')
             if v_src and (".mp4" in v_src or ".gif" in v_src): 
                 v_l.append('https:' + v_src if v_src.startswith('//') else v_src)
-        # Aggressive Regex from Original Code
         v_l.extend(re.findall(r'https?://[^\s"\'>]+.mp4', res.text))
         v_l = list(dict.fromkeys([v for v in v_l if "erome.com" in v]))
         return title, list(dict.fromkeys(p_l)), v_l
@@ -139,75 +156,86 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     if is_processed(album_id): return True
     
     loop = asyncio.get_running_loop()
-    title, photos, videos = await loop.run_in_executor(executor, scrape_album_details, url)
-    if not photos and not videos: return False
+    title, all_photos, all_videos = await loop.run_in_executor(executor, scrape_album_details, url)
+    if not all_photos and not all_videos: return False
     
     user_folder = os.path.join(DOWNLOAD_DIR, f"{chat_id}_{album_id}")
     os.makedirs(user_folder, exist_ok=True)
-    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive...**", reply_to_message_id=reply_id)
+    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Resume/Preparing: {title}**", reply_to_message_id=reply_id)
 
     # ORIGINAL KHMER CAPTION
     caption = (f"🎬 Topic: **{title}**\n"
                f"📂 Album: `{current}/{total}`\n"
-               f"📊 Total: `{len(photos)}` Photo | `{len(videos)}` Video\n"
+               f"📊 Total: `{len(all_photos)}` Photo | `{len(all_videos)}` Video\n"
                f"👤 User: `{username.upper()}`\n"
                f"📦 Original Quality")
 
-    if photos:
-        photo_media = []
-        for i, p_url in enumerate(photos, 1):
+    # --- PHOTO UPLOAD (With Resume Support) ---
+    pending_photos = [p for p in all_photos if not is_media_processed(p)]
+    if pending_photos:
+        for i in range(0, len(pending_photos), 10):
             if cancel_tasks.get(chat_id): break
-            path = os.path.join(user_folder, f"p_{i}.jpg")
-            try:
-                def dl_p():
-                    r = session.get(p_url, headers={'Referer': 'https://www.erome.com/'}, timeout=15)
-                    with open(path, 'wb') as f: f.write(r.content)
-                await loop.run_in_executor(executor, dl_p)
-                photo_media.append(InputMediaPhoto(path))
-            except: pass
-        for i in range(0, len(photo_media), 10):
-            chunk = photo_media[i:i+10]
-            if i == 0: chunk[0].caption = caption
-            try: 
-                await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
-                await asyncio.sleep(2)
-            except Exception as e: print(f"Photo Upload Error: {e}")
-        for f in os.listdir(user_folder):
-            if f.startswith("p_"): os.remove(os.path.join(user_folder, f))
-
-    if videos:
-        for v_idx, v_url in enumerate(videos, 1):
-            if cancel_tasks.get(chat_id): break
-            filepath = os.path.join(user_folder, f"v_{v_idx}" + (".gif" if ".gif" in v_url else ".mp4"))
-            try:
-                r_head = session.head(v_url, headers={'Referer': 'https://www.erome.com/'})
-                size = int(r_head.headers.get('content-length', 0))
-                await loop.run_in_executor(executor, download_nitro_animated, v_url, filepath, size, status, loop, f"🎬 Downloading Video {v_idx}/{len(videos)}", title)
-                
-                final_v = filepath + ".stream.mp4"
-                subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-movflags', 'faststart', final_v, '-y'], stderr=subprocess.DEVNULL)
-                if os.path.exists(final_v): os.replace(final_v, filepath)
-                
-                dur, w, h = get_video_meta(filepath)
-                thumb = filepath + ".jpg"
-                subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stderr=subprocess.DEVNULL)
-                
+            chunk = pending_photos[i:i+10]
+            photo_media = []
+            for p_url in chunk:
+                p_path = os.path.join(user_folder, f"p_temp_{pending_photos.index(p_url)}.jpg")
                 try:
-                    await client.send_video(
-                        chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
-                        width=w, height=h, duration=dur, supports_streaming=True, 
-                        caption=caption if not photos and v_idx == 1 else "",
-                        reply_to_message_id=reply_id, progress=pyrogram_progress, 
-                        progress_args=(status, [time.time()], f"📤 Uploading Video {v_idx}/{len(videos)}", title)
-                    )
-                except Exception as e:
-                    print(f"Video Upload Error: {e}")
-                    await client.send_message(chat_id, f"⚠️ Upload failed for video {v_idx} in `{title}`")
-                
-                await asyncio.sleep(2)
-                if os.path.exists(filepath): os.remove(filepath)
-                if os.path.exists(thumb): os.remove(thumb)
-            except Exception as e: print(f"Processing Error: {e}")
+                    def dl_p():
+                        r = session.get(p_url, headers={'Referer': 'https://www.erome.com/'}, timeout=15)
+                        with open(p_path, 'wb') as f: f.write(r.content)
+                    await loop.run_in_executor(executor, dl_p)
+                    photo_media.append(InputMediaPhoto(p_path))
+                except: pass
+            
+            if photo_media:
+                # ផ្ញើ Caption តែលើកដំបូងដែលវារកឃើញរូបមិនទាន់ផ្ញើប៉ុណ្ណោះ
+                if i == 0 and is_media_processed(all_photos[0]) is False:
+                    photo_media[0].caption = caption
+                try: 
+                    await client.send_media_group(chat_id, photo_media, reply_to_message_id=reply_id)
+                    for p_url in chunk: mark_media_processed(p_url, album_id)
+                    await asyncio.sleep(2)
+                except Exception as e: print(f"Photo Upload Error: {e}")
+            
+            for f in os.listdir(user_folder):
+                if "p_temp_" in f: os.remove(os.path.join(user_folder, f))
+
+    # --- VIDEO UPLOAD (With Resume Support) ---
+    for v_idx, v_url in enumerate(all_videos, 1):
+        if cancel_tasks.get(chat_id): break
+        if is_media_processed(v_url): continue # រំលងបើផ្ញើរួច
+        
+        filepath = os.path.join(user_folder, f"v_{v_idx}" + (".gif" if ".gif" in v_url else ".mp4"))
+        try:
+            r_head = session.head(v_url, headers={'Referer': 'https://www.erome.com/'})
+            size = int(r_head.headers.get('content-length', 0))
+            await loop.run_in_executor(executor, download_nitro_animated, v_url, filepath, size, status, loop, f"🎬 Downloading Video {v_idx}/{len(all_videos)}", title)
+            
+            final_v = filepath + ".stream.mp4"
+            subprocess.run(['ffmpeg', '-i', filepath, '-c', 'copy', '-movflags', 'faststart', final_v, '-y'], stderr=subprocess.DEVNULL)
+            if os.path.exists(final_v): os.replace(final_v, filepath)
+            
+            dur, w, h = get_video_meta(filepath)
+            thumb = filepath + ".jpg"
+            subprocess.run(['ffmpeg', '-ss', '1', '-i', filepath, '-vframes', '1', thumb, '-y'], stderr=subprocess.DEVNULL)
+            
+            try:
+                await client.send_video(
+                    chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
+                    width=w, height=h, duration=dur, supports_streaming=True, 
+                    caption=caption if not all_photos and v_idx == 1 else "",
+                    reply_to_message_id=reply_id, progress=pyrogram_progress, 
+                    progress_args=(status, [time.time()], f"📤 Uploading Video {v_idx}/{len(all_videos)}", title)
+                )
+                mark_media_processed(v_url, album_id)
+            except Exception as e:
+                print(f"Video Upload Error: {e}")
+                await client.send_message(chat_id, f"⚠️ Upload failed for video {v_idx} in `{title}`")
+            
+            await asyncio.sleep(2)
+            if os.path.exists(filepath): os.remove(filepath)
+            if os.path.exists(thumb): os.remove(thumb)
+        except Exception as e: print(f"Processing Error: {e}")
 
     mark_processed(album_id)
     await status.delete(); return True
@@ -228,7 +256,6 @@ async def user_cmd(client, message):
 
     all_urls = []
     total_p, total_v = 0, 0
-    # Search both profile and search engine as per original code
     scan_targets = [f"https://www.erome.com/{query}", f"https://www.erome.com/search?v={query}"]
     scan_anims = ["🔍", "🔎", "📡", "🛰"]
 
@@ -248,7 +275,6 @@ async def user_cmd(client, message):
                         album_url = "https://www.erome.com" + link_tag.get('href')
                         if album_url not in all_urls:
                             all_urls.append(album_url)
-                            # Extract stats from listing page
                             p_tag = album.select_one('span.album-photos')
                             v_tag = album.select_one('span.album-videos')
                             if p_tag: total_p += int(re.sub(r'\D', '', p_tag.text))
@@ -277,8 +303,11 @@ async def user_cmd(client, message):
 
 @app.on_message(filters.command("reset", prefixes="."))
 async def reset_db(client, message):
-    conn = sqlite3.connect(DB_NAME); conn.execute("DELETE FROM processed"); conn.commit(); conn.close()
-    await message.reply("🧹 **Memory Cleared!**")
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute("DELETE FROM processed")
+    conn.execute("DELETE FROM processed_media")
+    conn.commit(); conn.close()
+    await message.reply("🧹 **Memory Cleared! (Resume data also reset)**")
 
 @app.on_message(filters.command("cancel", prefixes="."))
 async def cancel_cmd(client, message):
@@ -288,7 +317,7 @@ async def cancel_cmd(client, message):
 async def main():
     init_db()
     async with app:
-        print("LOG: Formatted 100% Original Feature Bot Started!")
+        print("LOG: Full Feature + Resume Bot Started!")
         await idle()
 
 if __name__ == "__main__":
