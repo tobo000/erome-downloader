@@ -13,21 +13,21 @@ from pyrogram.errors import FloodWait, RPCError
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-# --- 1. CONFIGURATION (Identical to Original) ---
+# --- 1. CONFIGURATION ---
 load_dotenv()
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 
-app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH)
+app = Client("tobo_pro_session", api_id=int(API_ID), api_hash=API_HASH, sleep_threshold=60)
 DOWNLOAD_DIR = "downloads"
 DB_NAME = "bot_archive.db"
 if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
 
 session = requests.Session()
-executor = ThreadPoolExecutor(max_workers=8) # Back to 8 as per original
+executor = ThreadPoolExecutor(max_workers=8) 
 cancel_tasks = {}
 
-# --- 2. DATABASE (Identical to Original) ---
+# --- 2. DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -52,7 +52,7 @@ def mark_processed(album_id):
     except: pass
     conn.close()
 
-# --- 3. HELPERS & ANIMATIONS (Identical Moon Style) ---
+# --- 3. HELPERS & ANIMATIONS ---
 def create_progress_bar(current, total):
     if total <= 0: return "[░░░░░░░░░░] 0%"
     pct = min(100, (current / total) * 100)
@@ -64,9 +64,19 @@ def get_human_size(num):
         num /= 1024.0
     return f"{num:.1f} TB"
 
+async def safe_edit(msg, text):
+    try:
+        await msg.edit_text(text)
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        try: await msg.edit_text(text)
+        except: pass
+    except: pass
+
 async def update_progress_msg(current, total, status_msg, start_time, action_text, topic=""):
     now = time.time()
-    if now - start_time[0] > 8: # Throttled for safety
+    # ប្តូរមក ១០ វិនាទី ដើម្បីសុវត្ថិភាពបំផុតពី FloodWait 420
+    if now - start_time[0] > 10: 
         anims = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"]
         anim = anims[int(now % len(anims))]
         bar = create_progress_bar(current, total)
@@ -78,7 +88,8 @@ async def update_progress_msg(current, total, status_msg, start_time, action_tex
                 f"📦 **Original Size:** {get_human_size(current)} / {get_human_size(total)}"
             )
             start_time[0] = now
-        except FloodWait as e: await asyncio.sleep(e.value)
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
         except: pass
 
 async def pyrogram_progress(current, total, status_msg, start_time, action_text, topic=""):
@@ -95,7 +106,7 @@ def get_video_meta(video_path):
         return duration, width, height
     except: return 0, 1280, 720
 
-# --- 4. NITRO DOWNLOAD ENGINE (Identical Original Logic) ---
+# --- 4. NITRO DOWNLOAD ENGINE ---
 def download_nitro_animated(url, path, size, status_msg, loop, action, topic, segs=4):
     chunk = size // segs
     downloaded_shared = [0]
@@ -120,7 +131,7 @@ def download_nitro_animated(url, path, size, status_msg, loop, action, topic, se
             if os.path.exists(pp):
                 with open(pp, 'rb') as pf: f.write(pf.read()); pf.close(); os.remove(pp)
 
-# --- 5. SCRAPER (Aggressive Logic Included) ---
+# --- 5. SCRAPER ---
 def scrape_album_details(url):
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
     try:
@@ -139,7 +150,7 @@ def scrape_album_details(url):
         return title, list(dict.fromkeys(p_l)), v_l
     except: return "Error", [], []
 
-# --- 6. CORE DELIVERY (Fixed Peer ID + Error Catching) ---
+# --- 6. CORE DELIVERY (FIXED PEER ID + ERROR CATCHING) ---
 async def process_album(client, chat_id, reply_id, url, username, current, total):
     try: await client.get_chat(chat_id)
     except: pass
@@ -152,7 +163,12 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
     
     user_folder = os.path.join(DOWNLOAD_DIR, f"{chat_id}_{album_id}")
     os.makedirs(user_folder, exist_ok=True)
-    status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing Archive...**", reply_to_message_id=reply_id)
+    
+    try:
+        status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing: {title}**", reply_to_message_id=reply_id)
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        status = await client.send_message(chat_id, f"📡 **[{current}/{total}] Preparing: {title}**", reply_to_message_id=reply_id)
 
     album_caption = (f"🎬 Topic: **{title}**\n"
                      f"📂 Album: `{current}/{total}`\n"
@@ -160,6 +176,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                      f"👤 User: `{username.upper()}`\n"
                      f"📦 Original Quality")
 
+    # Photos Upload
     if photos:
         photo_media = []
         for i, p_url in enumerate(photos, 1):
@@ -175,11 +192,14 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
         for i in range(0, len(photo_media), 10):
             chunk = photo_media[i:i+10]
             if i == 0: chunk[0].caption = album_caption
-            try: await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id); await asyncio.sleep(2)
-            except: pass
+            try: 
+                await client.send_media_group(chat_id, chunk, reply_to_message_id=reply_id)
+                await asyncio.sleep(2)
+            except Exception as e: print(f"Photo Fail: {e}")
         for f in os.listdir(user_folder):
             if f.startswith("p_"): os.remove(os.path.join(user_folder, f))
 
+    # Videos Upload
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             if cancel_tasks.get(chat_id): break
@@ -205,16 +225,21 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                         reply_to_message_id=reply_id, progress=pyrogram_progress, 
                         progress_args=(status, [time.time()], f"📤 Uploading Video {v_idx}/{len(videos)}", title)
                     )
-                except Exception as e: print(f"Upload fail: {e}")
+                except Exception as e:
+                    print(f"Video Upload Fail: {e}")
+                    await client.send_message(chat_id, f"⚠️ Upload failed for video {v_idx} in `{title}`")
+                
                 await asyncio.sleep(2)
                 if os.path.exists(filepath): os.remove(filepath)
                 if os.path.exists(thumb): os.remove(thumb)
-            except Exception as e: print(f"Video fail: {e}")
+            except Exception as e: print(f"Process Fail: {e}")
 
     mark_processed(album_id)
-    await status.delete(); return True
+    try: await status.delete()
+    except: pass
+    return True
 
-# --- 7. HANDLERS (Full Original Command Set) ---
+# --- 7. HANDLERS ---
 
 @app.on_message(filters.command("reset", prefixes="."))
 async def reset_db(client, message):
@@ -237,33 +262,44 @@ async def user_cmd(client, message):
         return
 
     query = raw_input.split("erome.com/")[-1].split('/')[0]
-    msg = await message.reply(f"🛰 **Initializing Scanner for `{query}`...**")
     
+    try:
+        msg = await message.reply(f"🛰 **Initializing Scanner...**")
+    except FloodWait as e:
+        print(f"FloodWait: Waiting {e.value} seconds")
+        await asyncio.sleep(e.value)
+        msg = await message.reply(f"🛰 **Initializing Scanner...**")
+
     all_urls = []
-    # AGGRESSIVE SCANNER: PROFILE + SEARCH
-    scan_targets = [f"https://www.erome.com/{query}", f"https://www.erome.com/search?v={query}"]
+    page = 1
     scan_anims = ["🔍", "🔎", "📡", "🛰"]
 
-    for base_url in scan_targets:
-        page = 1
-        while page <= 15:
-            if cancel_tasks.get(chat_id): break
-            try:
-                await msg.edit_text(f"{scan_anims[page%4]} **Scanning Page {page}...**\n📦 Found: `{len(all_urls)}` albums")
-                res = session.get(f"{base_url}?page={page}" if "?" in base_url else f"{base_url}?page={page}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-                ids = re.findall(r'/a/([a-zA-Z0-9]{8})', res.text)
-                if not ids: break
-                new_found = 0
-                for aid in ids:
-                    f_url = f"https://www.erome.com/a/{aid}"
-                    if f_url not in all_urls: all_urls.append(f_url); new_found += 1
-                if new_found == 0 or "Next" not in res.text: break
-                page += 1; await asyncio.sleep(0.5)
-            except: break
-        if all_urls: break
+    while page <= 20:
+        if cancel_tasks.get(chat_id): break
+        try:
+            # Update status message every 2 pages to avoid Flood
+            if page % 2 == 0:
+                await safe_edit(msg, f"{scan_anims[page%4]} **Scanning Page {page}...**\n📦 Found: `{len(all_urls)}` albums")
+            
+            res = session.get(f"https://www.erome.com/{query}?page={page}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+            ids = re.findall(r'/a/([a-zA-Z0-9]{8})', res.text)
+            if not ids: break
+            
+            new_count = 0
+            for aid in ids:
+                f_url = f"https://www.erome.com/a/{aid}"
+                if f_url not in all_urls:
+                    all_urls.append(f_url)
+                    new_count += 1
+            
+            if new_count == 0 or "Next" not in res.text: break
+            page += 1
+            await asyncio.sleep(1)
+        except: break
 
-    if not all_urls: return await msg.edit_text(f"❌ No content for `{query}`.")
-    await msg.edit_text(f"✅ **Scanner Complete!**\n📊 Total Albums: `{len(all_urls)}`")
+    if not all_urls: return await safe_edit(msg, f"❌ No content for `{query}`.")
+    
+    await safe_edit(msg, f"✅ **Scanner Complete!**\n📊 Total Albums: `{len(all_urls)}`")
     await asyncio.sleep(2); await msg.delete()
 
     for i, url in enumerate(all_urls, 1):
