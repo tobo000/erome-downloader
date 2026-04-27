@@ -138,6 +138,7 @@ async def pyrogram_progress(current, total, status_msg, start_time, action_text,
                 f"{bar}\n📦 **Progress:** {get_human_size(current)} / {get_human_size(total)}"
             )
             start_time[0] = now
+        except FloodWait as e: await asyncio.sleep(e.value + 1)
         except: pass
 
 def get_video_meta(video_path):
@@ -146,11 +147,14 @@ def get_video_meta(video_path):
         res = subprocess.check_output(cmd).decode('utf-8'); data = json.loads(res)
         v = next((s for s in data['streams'] if s['codec_type'] == 'video'), {})
         dur = int(float(data.get('format', {}).get('duration', 0)))
-        return dur, int(v.get('width', 1280)), int(v.get('height', 720))
-    except: return 0, 1280, 720
+        # ធានាថា Width/Height ជាលេខគូ (Telegram Requirement)
+        return max(1, dur), int(v.get('width', 1280)), int(v.get('height', 720))
+    except: return 1, 1280, 720
+
+# --- 5. NITRO DOWNLOAD ENGINE ---
 
 def download_nitro_animated(url, path, size, status_msg, loop, action, topic, segs=4):
-    chunk = size // segs; downloaded = [0]; start_time = [time.time()]
+    chunk = size // segs; downloaded_shared = [0]; start_time = [time.time()]
     headers = {'User-Agent': 'Mozilla/5.0 Chrome/121.0.0.0', 'Referer': 'https://www.erome.com/'}
     def dl_part(s, e, n):
         pp = f"{path}.p{n}"; h = headers.copy(); h['Range'] = f'bytes={s}-{e}'
@@ -159,8 +163,8 @@ def download_nitro_animated(url, path, size, status_msg, loop, action, topic, se
                 with open(pp, 'wb') as f:
                     for chk in r.iter_content(chunk_size=1024*1024):
                         if chk:
-                            f.write(chk); downloaded[0] += len(chk)
-                            asyncio.run_coroutine_threadsafe(pyrogram_progress(downloaded[0], size, status_msg, start_time, action, topic), loop)
+                            f.write(chk); downloaded_shared[0] += len(chk)
+                            asyncio.run_coroutine_threadsafe(pyrogram_progress(downloaded_shared[0], size, status_msg, start_time, action, topic), loop)
         except: pass
     with ThreadPoolExecutor(max_workers=8) as ex:
         futures = [ex.submit(dl_part, i*chunk, ((i+1)*chunk-1 if i < size - 1 else size-1), i) for i in range(segs)]
@@ -171,7 +175,7 @@ def download_nitro_animated(url, path, size, status_msg, loop, action, topic, se
             if os.path.exists(pp):
                 with open(pp, 'rb') as pf: f.write(pf.read()); pf.close(); os.remove(pp)
 
-# --- 5. SCRAPER ENGINE ---
+# --- 6. SCRAPER ENGINE ---
 
 def scrape_album_details(url):
     h = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
@@ -180,15 +184,14 @@ def scrape_album_details(url):
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else "Untitled"
         p_l = [img.get('data-src') or img.get('src') for img in soup.select('div.img img')]
         p_l = ['https:' + x if x.startswith('//') else x for x in p_l if x]
-        # លុបរូបភាពស្ទួន (Remove Duplicates)
+        # លុបរូបភាពស្ទួន
         p_l = list(dict.fromkeys(p_l))
-        
         v_l = list(dict.fromkeys(re.findall(r'https?://[^\s"\'>]+.(?:mp4|gif)', res.text)))
         v_l = [v for v in v_l if "erome.com" in v]
         return title, p_l, v_l
     except: return "Error", [], []
 
-# --- 6. CORE DELIVERY ---
+# --- 7. CORE DELIVERY ---
 
 async def process_album(client, chat_id, reply_id, url, username, current, total):
     try: await client.get_chat(chat_id)
@@ -219,12 +222,10 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             for p_url in chunk:
                 p_idx = all_photos.index(p_url) + 1
                 p_path = os.path.join(user_folder, f"p_{p_idx}.jpg")
-                try:
-                    r = session.get(p_url, timeout=15); open(p_path, 'wb').write(r.content)
-                    cap = (master_cap if media_sent_count == 0 else "") + f"🖼 Photo: {p_idx}/{len(all_photos)} | 📦 {get_human_size(os.path.getsize(p_path))}"
-                    group.append(InputMediaPhoto(p_path, caption=cap))
-                    media_sent_count += 1
-                except: pass
+                r = session.get(p_url); open(p_path, 'wb').write(r.content)
+                cap = (master_cap if media_sent_count == 0 else "") + f"🖼 Photo: {p_idx}/{len(all_photos)} | 📦 {get_human_size(os.path.getsize(p_path))}"
+                group.append(InputMediaPhoto(p_path, caption=cap))
+                media_sent_count += 1
             if group:
                 while True:
                     try: 
@@ -234,7 +235,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     except FloodWait as e: await asyncio.sleep(e.value + 1)
             for f in glob.glob(os.path.join(user_folder, "p_*.jpg")): os.remove(f)
 
-    # --- VIDEOS ---
+    # --- VIDEOS (Strict Playable Fix) ---
     for v_idx, v_url in enumerate(all_videos, 1):
         if cancel_tasks.get(chat_id) or is_media_processed(v_url): continue
         is_gif = v_url.lower().endswith(".gif"); filepath = os.path.join(user_folder, f"v_{v_idx}.mp4")
@@ -242,10 +243,10 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
             r_h = session.head(v_url); size = int(r_h.headers.get('content-length', 0))
             await loop.run_in_executor(executor, download_nitro_animated, v_url, filepath, size, status, loop, f"📥 Downloading Video {v_idx}", title)
             
-            # --- PLAYABLE VIDEO FIX ---
-            # ប្រើ libx264, yuv420p និង faststart ដើម្បីធានាថា Play ក្នុង Telegram បាន ១០០%
-            final_mp4 = filepath.replace(".mp4", ".fix.mp4")
-            subprocess.run(['ffmpeg', '-i', filepath, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-vf', "scale='if(gt(iw,ih),min(1280,iw),-2)':'if(gt(iw,ih),-2,min(720,ih))'", '-crf', '23', final_mp4, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            final_mp4 = os.path.join(user_folder, f"final_{v_idx}.mp4")
+            # បង្ខំឱ្យប្រើ Libx264 និង faststart សម្រាប់ Playability
+            subprocess.run(['ffmpeg', '-i', filepath, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-crf', '23', '-c:a', 'aac', final_mp4, '-y'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
             if os.path.exists(final_mp4): 
                 os.remove(filepath); filepath = final_mp4
 
@@ -257,10 +258,11 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 
             while True:
                 try:
-                    # បញ្ជូនទទឹង និងកម្ពស់ពិត ដើម្បីកុំឱ្យចេញជា Document
+                    # ផ្ញើដោយមាន Width, Height, Duration ច្បាស់លាស់ដើម្បីកុំឱ្យចេញជា Document
                     await client.send_video(
                         chat_id=chat_id, video=filepath, thumb=thumb if os.path.exists(thumb) else None,
-                        width=w, height=h, duration=dur, supports_streaming=True, caption=v_cap,
+                        width=int(w), height=int(h), duration=int(dur), 
+                        supports_streaming=True, caption=v_cap,
                         reply_to_message_id=reply_id, progress=pyrogram_progress,
                         progress_args=(status, [time.time()], f"📤 Uploading Video {v_idx}", title)
                     )
@@ -272,7 +274,7 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 
     mark_processed(album_id); await status.delete(); return True
 
-# --- 7. HANDLERS ---
+# --- 8. HANDLERS ---
 
 @app.on_message(filters.command("user", prefixes=".") & (filters.me | filters.user(ADMIN_IDS)))
 async def user_cmd(client, message):
@@ -287,7 +289,7 @@ async def user_cmd(client, message):
         while True: 
             if cancel_tasks.get(chat_id): break
             try:
-                await safe_edit(msg, f"{scan_anims[page%4]} Scanning `{query}` - Page {page}...\nFound: {len(all_urls)} Albums")
+                await safe_edit(msg, f"{scan_anims[page%4]} Scanning Page {page}...\nFound: {len(all_urls)} Albums")
                 res = session.get(f"{base_url}?page={page}" if "?" in base_url else f"{base_url}/?page={page}", headers=h, timeout=15)
                 ids = re.findall(r'/a/([a-zA-Z0-9]{8})', res.text)
                 if not ids: break
@@ -324,7 +326,7 @@ async def dl_handler(client, message):
 async def main():
     init_db(); 
     async with app:
-        print("LOG: V8.96 Ultra Final Online!"); await idle()
+        print("LOG: V8.97 Final Stable Online!"); await idle()
 
 if __name__ == "__main__":
     app.run(main())
