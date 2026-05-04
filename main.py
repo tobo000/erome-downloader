@@ -590,7 +590,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 
     downloaded_photos, downloaded_videos = [], []
 
-    # Download Photos
     if photos:
         for i, p_url in enumerate(photos, 1):
             if cancel_tasks.get(chat_id): break
@@ -608,7 +607,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                 downloaded_photos.append((path, f"Photo `{i}/{len(photos)}` | `{get_human_size(os.path.getsize(path))}`", p_url))
             except Exception as e: error_notifier.notify("Photo Download", str(e), album_id); log_error_to_db(album_id, "photo_download", str(e))
 
-    # Download Videos
     if videos:
         for v_idx, v_url in enumerate(videos, 1):
             if cancel_tasks.get(chat_id): break
@@ -641,7 +639,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
 
     print(f"   ✅ Downloaded: {len(downloaded_photos)}p, {len(downloaded_videos)}v")
 
-    # Upload Phase
     chat_lock = get_chat_lock(chat_id)
     uploaded_p, uploaded_v = 0, 0
     all_uploaded = True
@@ -652,7 +649,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
         master_caption = f"**{title}**\n━━━━━━━━━━━━━━━━\nAlbum: `{current}/{total}`\nContent: `{len(downloaded_photos)}` Photos | `{len(downloaded_videos)}` Videos{' | ' + str(gif_count) + ' GIFs' if gif_count else ''}\nPlatform: `{platform.upper()}`\nUser: `{username.upper()}`\nQuality: Original\n━━━━━━━━━━━━━━━━"
         master_caption_sent = False
 
-        # Upload Photos
         if downloaded_photos:
             photo_media = []
             for idx, (path, caption, p_url) in enumerate(downloaded_photos, 1):
@@ -672,7 +668,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
                     if os.path.exists(path): os.remove(path)
                 except: pass
 
-        # Upload Videos
         if downloaded_videos:
             for idx, (filepath, thumb, w, h, dur, caption, is_gif, v_url) in enumerate(downloaded_videos, 1):
                 mt = "GIF" if is_gif else "Video"
@@ -704,7 +699,6 @@ async def process_album(client, chat_id, reply_id, url, username, current, total
         try: await status.delete()
         except: pass
 
-    # Verify & Mark
     missing = media_tracker.get_missing_media(album_id); mp, mv = len(missing['photos']), len(missing['videos'])
     if all_uploaded and mp == 0 and mv == 0: github_synced = mark_fully_processed(album_id, title, len(photos), len(videos)); album_success = True
     else: mark_failed(album_id, url, title, len(photos), len(videos), "upload_incomplete", f"Missing: {mp}p, {mv}v"); github_synced = False; album_success = False
@@ -730,7 +724,6 @@ async def retry_failed_albums(client, chat_id, reply_id):
 # START DOWNLOAD RANGE
 # ============================================
 async def start_download_range(client, chat_id, reply_id, query, all_urls):
-    """Start downloading selected range of albums"""
     for i, url in enumerate(all_urls, 1):
         if cancel_tasks.get(chat_id): break
         await smart_queue.add_task(f"{query}_{i}", process_album, priority=i, client=client, chat_id=chat_id, reply_id=reply_id, url=url, username=query, current=i, total=len(all_urls))
@@ -789,25 +782,7 @@ async def handle_callbacks(client, callback_query):
 # ============================================
 @app.on_message(filters.command("start", prefixes=".") & filters.user(ADMIN_IDS))
 async def start_cmd(client, message):
-    await message.reply(
-        "**🤖 Bot Started!**\n\n"
-        "**Platforms:** Erome.com | Mega.nz\n\n"
-        "**Commands:**\n"
-        ".user `<username>` - Scan + choose range\n"
-        ".user `<username> <start>-<end>` - Custom range\n"
-        ".user `<username> all` - Download all\n"
-        ".user `<url>` - Direct album/file\n"
-        ".retry - Retry failed\n.failed - Show failed\n"
-        ".rate - Rate optimizer\n.dashboard - Live status\n"
-        ".errors - Errors\n.missing - Missing\n"
-        ".cancel - Stop\n.stats - Statistics\n.reset - Reset DB\n\n"
-        "**Examples:**\n"
-        ".user Ashpaul69         → Scan + choose\n"
-        ".user Ashpaul69 1-50    → Albums 1 to 50\n"
-        ".user Ashpaul69 all     → All albums\n"
-        ".user https://erome.com/a/abc",
-        reply_markup=keyboard_manager.get_control_keyboard()
-    )
+    await message.reply("**Bot Started!**\n\n**Platforms:** Erome | Mega.nz\n\n.user `<username>` - Scan + choose\n.user `<username> <start>-<end>` - Range\n.user `<username> all` - All\n.user `<url>` - Direct\n.retry | .failed | .rate | .dashboard\n.errors | .missing | .cancel | .stats | .reset", reply_markup=keyboard_manager.get_control_keyboard())
 
 @app.on_message(filters.command("retry", prefixes=".") & filters.user(ADMIN_IDS))
 async def retry_cmd(client, message):
@@ -861,25 +836,20 @@ async def user_cmd(client, message):
     raw_input = args[0].strip()
     range_param = args[1].strip() if len(args) > 1 else None
 
-    # Auto-detect platform
     if not raw_input.startswith('http'): platform = 'erome'; query = raw_input
     else: platform = detect_platform(raw_input); query = raw_input.split("erome.com/")[-1].split('/')[0] if platform == 'erome' else raw_input
 
     print(f"   🔍 Detected: {platform.upper()} | Input: {raw_input} | Range: {range_param}")
 
-    # Direct album/file URL
     if platform in ['erome', 'mega'] and ('/a/' in raw_input or '/folder/' in raw_input or '/file/' in raw_input or '/#F!' in raw_input):
         await process_album(client, chat_id, message.id, raw_input, "direct", 1, 1); return
 
-    # Mega.nz
     if platform == 'mega': await process_album(client, chat_id, message.id, raw_input, "mega", 1, 1); return
 
-    # Erome - SCAN FIRST
     if platform == 'erome':
         msg = await message.reply(f"**🔍 Scanning Erome: `{query}`...**")
         all_urls = []; headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.erome.com/'}
         
-        # Profile pages
         page = 1
         while True:
             if cancel_tasks.get(chat_id): break
@@ -897,7 +867,6 @@ async def user_cmd(client, message):
             except: break
         profile_pages = page
         
-        # Search pages
         search_page = 1
         while True:
             if cancel_tasks.get(chat_id): break
@@ -915,12 +884,9 @@ async def user_cmd(client, message):
         
         if not all_urls: return await msg.edit_text(f"**❌ No content found for `{query}`**")
         
-        # Store for later use
         scanned_urls[query] = all_urls
-        
         print(f"\n{'='*60}\n✅ SCAN: {query} | {len(all_urls)} albums | {profile_pages}+{search_page} pages\n{'='*60}\n")
         
-        # Check for range parameter
         if range_param:
             if range_param.lower() == 'all':
                 await msg.edit_text(f"**✅ Downloading ALL {len(all_urls)} albums!**")
@@ -935,12 +901,11 @@ async def user_cmd(client, message):
                     await msg.edit_text(f"**✅ Downloading albums {start} to {end} ({len(selected_urls)} albums)!**")
                     await start_download_range(client, chat_id, message.id, query, selected_urls)
                 except:
-                    await msg.edit_text(f"**❌ Invalid range. Use like: `.user {query} 1-50`**")
-            else:
-                await msg.edit_text(f"**❌ Invalid option. Use `.user {query} all` or `.user {query} 1-50`**")
+                    await msg.edit_text(f"**❌ Invalid range.**")
         else:
-            # Show choice buttons
-            await msg.edit_text(
+            # 🆕 FIXED: Delete old message, send new one with buttons
+            await msg.delete()
+            await message.reply(
                 f"**✅ Scan Complete!**\n"
                 f"━━━━━━━━━━━━━━━━\n"
                 f"User: `{query}`\n"
@@ -977,10 +942,7 @@ async def main():
         print("🚀 BOT STARTED - Erome + Mega.nz")
         print("=" * 60)
         print("✅ GitHub Sync: Active")
-        print("✅ Erome: .user Ashpaul69 (scan + choose)")
-        print("✅ Erome: .user Ashpaul69 1-50 (range)")
-        print("✅ Erome: .user Ashpaul69 all (all)")
-        print("✅ Mega: .user https://mega.nz/file/abc")
+        print("✅ Buttons: Fixed (new message with reply_markup)")
         print("=" * 60 + "\n")
         await retry_failed_albums(app, ADMIN_IDS[0], 0)
         await idle()
