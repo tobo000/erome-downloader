@@ -66,7 +66,6 @@ session = requests.Session()
 executor = ThreadPoolExecutor(max_workers=8)
 cancel_tasks = {}
 chat_locks = {}
-scanned_urls = {}
 
 # ============================================
 # RATE LIMIT OPTIMIZER
@@ -310,26 +309,6 @@ class SmartCompressor:
         return None
 
 smart_compressor = SmartCompressor()
-
-# ============================================
-# KEYBOARD MANAGER
-# ============================================
-class KeyboardManager:
-    @staticmethod
-    def get_control_keyboard():
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏸ Pause", callback_data="pause_all"), InlineKeyboardButton("▶️ Resume", callback_data="resume_all"), InlineKeyboardButton("🛑 Cancel", callback_data="cancel_all")],
-            [InlineKeyboardButton("📊 Dashboard", callback_data="show_dashboard"), InlineKeyboardButton("🧹 Clean Cache", callback_data="clean_cache")]
-        ])
-    
-    @staticmethod
-    def get_download_options_keyboard(total_albums: int, query: str):
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"📥 Download All ({total_albums})", callback_data=f"dlall_{query}")],
-            [InlineKeyboardButton("✏️ Custom Range", callback_data=f"dlcustom_{query}")],
-        ])
-
-keyboard_manager = KeyboardManager()
 
 # ============================================
 # GITHUB SYNC
@@ -721,68 +700,51 @@ async def retry_failed_albums(client, chat_id, reply_id):
         print("✅ Retry complete\n")
 
 # ============================================
-# START DOWNLOAD RANGE
-# ============================================
-async def start_download_range(client, chat_id, reply_id, query, all_urls):
-    for i, url in enumerate(all_urls, 1):
-        if cancel_tasks.get(chat_id): break
-        await smart_queue.add_task(f"{query}_{i}", process_album, priority=i, client=client, chat_id=chat_id, reply_id=reply_id, url=url, username=query, current=i, total=len(all_urls))
-    await smart_queue.process_queue()
-    stats = smart_queue.get_stats(); failed = get_failed_albums()
-    await client.send_message(chat_id, f"**✅ Done!**\n━━━━━━━━━━━━━━━━\nSuccess: `{stats['completed']}`\nFailed: `{stats['failed']}`\nRetry: `{len(failed)}`\n━━━━━━━━━━━━━━━━\n\n_.retry | .failed | .rate_")
-
-# ============================================
-# CALLBACK HANDLERS
+# CALLBACK HANDLERS (Control buttons only)
 # ============================================
 @app.on_callback_query(filters.user(ADMIN_IDS))
 async def handle_callbacks(client, callback_query):
     data = callback_query.data
-    chat_id = callback_query.message.chat.id
-    
     try:
-        if data.startswith("dlall_"):
-            query = data.replace("dlall_", "")
-            if query in scanned_urls:
-                all_urls = scanned_urls[query]
-                await callback_query.answer(f"Starting download of all {len(all_urls)} albums!")
-                await callback_query.message.edit_text(f"**✅ Downloading ALL {len(all_urls)} albums!**")
-                await start_download_range(client, chat_id, callback_query.message.id, query, all_urls)
-            else:
-                await callback_query.answer("❌ Scan data expired. Please scan again.")
-        
-        elif data.startswith("dlcustom_"):
-            query = data.replace("dlcustom_", "")
-            total = len(scanned_urls.get(query, []))
-            await callback_query.message.reply(
-                f"**✏️ Custom Range**\n\n"
-                f"Total albums: `{total}`\n\n"
-                f"Send command:\n"
-                f"`.user {query} START-END`\n\n"
-                f"**Examples:**\n"
-                f"`.user {query} 1-50`\n"
-                f"`.user {query} 100-200`\n"
-                f"`.user {query} 500-1000`"
-            )
-            await callback_query.answer("Send custom range!")
-        
-        elif data == "show_dashboard":
-            await callback_query.message.reply(live_dashboard.get_dashboard_text(smart_queue.get_stats()) + "\n" + rate_optimizer.get_dashboard_text(), reply_markup=keyboard_manager.get_control_keyboard())
+        if data == "show_dashboard":
+            await callback_query.message.reply(live_dashboard.get_dashboard_text(smart_queue.get_stats()) + "\n" + rate_optimizer.get_dashboard_text(), reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⏸ Pause", callback_data="pause_all"), InlineKeyboardButton("▶️ Resume", callback_data="resume_all"), InlineKeyboardButton("🛑 Cancel", callback_data="cancel_all")]
+            ]))
             await callback_query.answer("Dashboard!")
         elif data == "pause_all": smart_queue.pause(); await callback_query.answer("Paused!")
         elif data == "resume_all": smart_queue.resume(); await callback_query.answer("Resumed!")
-        elif data == "cancel_all": smart_queue.cancel_all(); cancel_tasks[chat_id] = True; await callback_query.answer("Cancelled!")
+        elif data == "cancel_all": smart_queue.cancel_all(); cancel_tasks[callback_query.message.chat.id] = True; await callback_query.answer("Cancelled!")
         elif data == "clean_cache": await callback_query.answer(f"Cleaned {smart_cache.clean_old_cache()} files!")
-    except Exception as e:
-        print(f"Callback error: {e}")
-        try: await callback_query.answer("Error!")
-        except: pass
+    except: pass
 
 # ============================================
 # COMMAND HANDLERS
 # ============================================
 @app.on_message(filters.command("start", prefixes=".") & filters.user(ADMIN_IDS))
 async def start_cmd(client, message):
-    await message.reply("**Bot Started!**\n\n**Platforms:** Erome | Mega.nz\n\n.user `<username>` - Scan + choose\n.user `<username> <start>-<end>` - Range\n.user `<username> all` - All\n.user `<url>` - Direct\n.retry | .failed | .rate | .dashboard\n.errors | .missing | .cancel | .stats | .reset", reply_markup=keyboard_manager.get_control_keyboard())
+    await message.reply(
+        "**🤖 Bot Started!**\n\n"
+        "**Platforms:** Erome.com | Mega.nz\n\n"
+        "**Commands:**\n"
+        ".user `<username>` - Scan user\n"
+        ".user `<username> <start>-<end>` - Range\n"
+        ".user `<username> all` - Download all\n"
+        ".user `<url>` - Direct album/file\n"
+        ".retry - Retry failed\n"
+        ".failed - Show failed\n"
+        ".rate - Rate optimizer\n"
+        ".dashboard - Live status\n"
+        ".errors - Errors\n"
+        ".missing - Missing\n"
+        ".cancel - Stop\n"
+        ".stats - Statistics\n"
+        ".reset - Reset DB\n\n"
+        "**Examples:**\n"
+        ".user Ashpaul69\n"
+        ".user Ashpaul69 1-50\n"
+        ".user Ashpaul69 all\n"
+        ".user https://erome.com/a/abc"
+    )
 
 @app.on_message(filters.command("retry", prefixes=".") & filters.user(ADMIN_IDS))
 async def retry_cmd(client, message):
@@ -807,7 +769,7 @@ async def rate_cmd(client, message):
 async def cancel_cmd(client, message): cancel_tasks[message.chat.id] = True; smart_queue.cancel_all(); await message.reply("**🛑 Cancelled!**")
 
 @app.on_message(filters.command("dashboard", prefixes=".") & filters.user(ADMIN_IDS))
-async def dashboard_cmd(client, message): await message.reply(live_dashboard.get_dashboard_text(smart_queue.get_stats()) + "\n" + rate_optimizer.get_dashboard_text(), reply_markup=keyboard_manager.get_control_keyboard())
+async def dashboard_cmd(client, message): await message.reply(live_dashboard.get_dashboard_text(smart_queue.get_stats()) + "\n" + rate_optimizer.get_dashboard_text())
 
 @app.on_message(filters.command("errors", prefixes=".") & filters.user(ADMIN_IDS))
 async def errors_cmd(client, message):
@@ -884,13 +846,15 @@ async def user_cmd(client, message):
         
         if not all_urls: return await msg.edit_text(f"**❌ No content found for `{query}`**")
         
-        scanned_urls[query] = all_urls
         print(f"\n{'='*60}\n✅ SCAN: {query} | {len(all_urls)} albums | {profile_pages}+{search_page} pages\n{'='*60}\n")
         
         if range_param:
             if range_param.lower() == 'all':
                 await msg.edit_text(f"**✅ Downloading ALL {len(all_urls)} albums!**")
-                await start_download_range(client, chat_id, message.id, query, all_urls)
+                for i, url in enumerate(all_urls, 1):
+                    if cancel_tasks.get(chat_id): break
+                    await smart_queue.add_task(f"{query}_{i}", process_album, priority=i, client=client, chat_id=chat_id, reply_id=message.id, url=url, username=query, current=i, total=len(all_urls))
+                await smart_queue.process_queue()
             elif '-' in range_param:
                 try:
                     start, end = range_param.split('-')
@@ -899,13 +863,15 @@ async def user_cmd(client, message):
                     if start > end: start, end = end, start
                     selected_urls = all_urls[start-1:end]
                     await msg.edit_text(f"**✅ Downloading albums {start} to {end} ({len(selected_urls)} albums)!**")
-                    await start_download_range(client, chat_id, message.id, query, selected_urls)
+                    for i, url in enumerate(selected_urls, 1):
+                        if cancel_tasks.get(chat_id): break
+                        await smart_queue.add_task(f"{query}_{start+i-1}", process_album, priority=i, client=client, chat_id=chat_id, reply_id=message.id, url=url, username=query, current=start+i-1, total=len(selected_urls))
+                    await smart_queue.process_queue()
                 except:
-                    await msg.edit_text(f"**❌ Invalid range.**")
+                    await msg.edit_text(f"**❌ Invalid range.** Use like: `.user {query} 1-50`")
         else:
-            # 🆕 FIXED: Delete old message, send new one with buttons
-            await msg.delete()
-            await message.reply(
+            # No range - just show scan results
+            await msg.edit_text(
                 f"**✅ Scan Complete!**\n"
                 f"━━━━━━━━━━━━━━━━\n"
                 f"User: `{query}`\n"
@@ -913,9 +879,13 @@ async def user_cmd(client, message):
                 f"Profile Pages: `{profile_pages}`\n"
                 f"Search Pages: `{search_page}`\n"
                 f"━━━━━━━━━━━━━━━━\n\n"
-                f"_Choose download option:_",
-                reply_markup=keyboard_manager.get_download_options_keyboard(len(all_urls), query)
+                f"_Use `.user {query} 1-50` to start downloading_\n"
+                f"_Use `.user {query} all` to download all_"
             )
+        
+        if range_param:
+            stats = smart_queue.get_stats(); failed = get_failed_albums()
+            await message.reply(f"**✅ Done!**\nSuccess: `{stats['completed']}` | Failed: `{stats['failed']}` | Retry: `{len(failed)}`")
 
 @app.on_message(filters.command("reset", prefixes=".") & filters.user(ADMIN_IDS))
 async def reset_db(client, message):
@@ -941,8 +911,8 @@ async def main():
         print("\n" + "=" * 60)
         print("🚀 BOT STARTED - Erome + Mega.nz")
         print("=" * 60)
+        print("✅ Direct Commands Only")
         print("✅ GitHub Sync: Active")
-        print("✅ Buttons: Fixed (new message with reply_markup)")
         print("=" * 60 + "\n")
         await retry_failed_albums(app, ADMIN_IDS[0], 0)
         await idle()
